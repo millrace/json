@@ -90,7 +90,7 @@ tests-cpu = "mojo -I . tests/test_value.mojo && mojo -I . tests/test_parser.mojo
 # flag and exercises the real GPU path.
 tests-gpu = "mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . tests/test_gpu.mojo && mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . examples/advanced/gpu_parsing.mojo"
 tests-e2e = "mojo -I . tests/test_e2e.mojo"
-tests-e2e-gpu = "MOJSON_TEST_GPU=1 mojo -I . tests/test_e2e.mojo"
+tests-e2e-gpu = "MOJSON_TEST_GPU=1 mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . tests/test_e2e.mojo"
 
 # Per-example tasks (examples/<tier>/<file>.mojo).
 example-parsing    = "mojo -I . examples/basic/parsing.mojo"
@@ -140,7 +140,13 @@ build-cujson = "bash -c 'cd benchmark && if [ ! -d cuJSON ]; then echo \"Error: 
 
 # Build benchmark binaries (calls `mojo build` -> needs sysroot >= 2.34)
 build-bench-cpu = { cmd = "mkdir -p benchmark/build && mojo build -I . -o benchmark/build/bench_cpu benchmark/mojo/bench_cpu.mojo", depends-on = ["build"] }
-build-bench-gpu = { cmd = "mkdir -p benchmark/build && mojo build -I . -o benchmark/build/bench_gpu benchmark/mojo/bench_gpu.mojo", depends-on = ["build"] }
+# benchmark/mojo/bench_gpu.mojo imports json.gpu unconditionally,
+# which pulls in raw-pointer kernels Mojo's Metal backend rejects with
+# `Metal Compiler failed to compile metallib`. The GPU benchmark is
+# therefore Linux + NVIDIA / AMD only; on macOS we skip cleanly so a
+# dev-box `pixi run bench-gpu` reports the situation rather than
+# erroring out mid-build. Linux CI runs the real benchmark.
+build-bench-gpu = { cmd = "bash -c 'if [[ $(uname) == Darwin ]]; then echo \"── bench-gpu: skipped on macOS (Metal lacks raw-pointer kernel support)\"; exit 0; fi; mkdir -p benchmark/build && mojo build -I . -o benchmark/build/bench_gpu benchmark/mojo/bench_gpu.mojo'", depends-on = ["build"] }
 build-bench-simdjson = { cmd = "bash -c 'mkdir -p benchmark/build && CXX=$(if [[ $(uname) == Darwin ]]; then echo clang++; else echo g++; fi) && $CXX -O3 -std=c++17 -o benchmark/build/bench_simdjson benchmark/cpp/bench_simdjson.cpp -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -lsimdjson -Wl,-rpath,$CONDA_PREFIX/lib'", depends-on = ["build"] }
 
 # Benchmarks - pass file path and flags as arguments, path defaults to twitter.json
@@ -148,7 +154,7 @@ build-bench-simdjson = { cmd = "bash -c 'mkdir -p benchmark/build && CXX=$(if [[
 #        pixi run -e dev bench-gpu path/to/file.json
 #        pixi run -e dev bench-gpu -- --debug-timing path/to/file.json
 bench-cpu = { cmd = "bash -c 'F=\"${1:-benchmark/datasets/twitter.json}\"; benchmark/build/bench_simdjson \"$F\" && echo && benchmark/build/bench_cpu \"$F\"' _", depends-on = ["build-bench-cpu", "build-bench-simdjson"] }
-bench-gpu = { cmd = "bash -c 'if [ \"$#\" -eq 0 ]; then benchmark/build/bench_gpu benchmark/datasets/twitter.json; else benchmark/build/bench_gpu \"$@\"; fi' _", depends-on = ["build-bench-gpu"] }
+bench-gpu = { cmd = "bash -c 'if [[ $(uname) == Darwin ]]; then echo \"── bench-gpu: skipped on macOS (Metal lacks raw-pointer kernel support)\"; exit 0; fi; if [ \"$#\" -eq 0 ]; then benchmark/build/bench_gpu benchmark/datasets/twitter.json; else benchmark/build/bench_gpu \"$@\"; fi' _", depends-on = ["build-bench-gpu"] }
 bench-gpu-all = { cmd = "bash -c 'for i in 1 2 3; do for f in benchmark/datasets/*_large_*.json; do echo \"=== Run $i: $f ===\"; benchmark/build/bench_gpu \"$f\"; done; done'", depends-on = ["build-bench-gpu"] }
 
 # GPU benchmark vs cuJSON (NVIDIA only, requires manual cuJSON download)
