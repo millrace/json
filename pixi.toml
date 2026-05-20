@@ -122,6 +122,13 @@ install-pre-commit = "pre-commit install"
 format = { cmd = "mojo format json tests benchmark/mojo", depends-on = ["install-pre-commit"] }
 format-check = { cmd = "bash -c 'mojo format json tests benchmark/mojo && git diff --exit-code json tests benchmark/mojo || (echo \"Error: Code is not formatted. Run \\\"pixi run -e dev format\\\" to fix.\" && exit 1)'" }
 
+# ── Sanitizer harness (see tools/run_sanitizer_tests.sh) ────────────
+# tests-asan: AOT-compile the FFI- and lifetime-heavy test inventory
+#             with --sanitize address (LLVM AddressSanitizer) and run
+#             each binary one at a time. Linux-only on this Mojo
+#             nightly; the script prints a clear skip message on macOS.
+tests-asan = "bash tools/run_sanitizer_tests.sh asan"
+
 # Download benchmark datasets from Google Drive (cuJSON datasets)
 # Full folder: https://drive.google.com/drive/folders/1PkDEy0zWOkVREfL7VuINI-m9wJe45P2Q
 download-twitter-large = "gdown -O benchmark/datasets/twitter_large_record.json 1mdF4HT7s0Jp4XZ0nOxY7lQpcwRZzCjE1"
