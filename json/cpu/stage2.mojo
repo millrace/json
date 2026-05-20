@@ -338,7 +338,7 @@ def _parse_array(
     var count = 0
     var depth = 0
     var last_top_comma_byte = -1
-    var prev_top_comma_byte = -1
+    var prev_top_comma_byte: Int
     var k = open_idx + 1
     while k < close_idx:
         var off = Int(positions[k])
