@@ -1,4 +1,4 @@
-# Example 11: JSON Patch (RFC 6902) and Merge Patch (RFC 7396)
+# JSON Patch (RFC 6902) and Merge Patch (RFC 7396)
 #
 # JSON Patch: Apply a sequence of operations to modify JSON documents.
 # Merge Patch: Simpler patching by merging objects (null removes keys).

@@ -1,4 +1,4 @@
-# Example 01: Basic JSON Parsing
+# Basic JSON parsing
 #
 # Demonstrates: loads() and dumps() for string-based JSON operations
 

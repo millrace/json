@@ -163,24 +163,43 @@ Full API reference: [ehsanmok.github.io/json](https://ehsanmok.github.io/json/)
 
 ## Examples
 
+Examples are organised by progression -- start in `basic/`, move to
+`intermediate/` when you need typed serde / JSONPath / Schema / Patch,
+and dip into `advanced/` for lazy and GPU paths. See
+[examples/README.md](./examples/README.md) for the full guided tour.
+
 ```bash
-pixi run mojo -I . examples/01_basic_parsing.mojo
+pixi run examples                                  # run every tier
+pixi run example-parsing                           # one example by name
+pixi run mojo -I . examples/basic/parsing.mojo     # or invoke mojo directly
 ```
+
+### basic/ -- first ten lines of code
 
 | Example | Description |
 |---------|-------------|
-| [01_basic_parsing](./examples/01_basic_parsing.mojo) | Parse, serialize, type handling |
-| [02_file_operations](./examples/02_file_operations.mojo) | Read/write JSON files |
-| [03_value_types](./examples/03_value_types.mojo) | Type checking, value extraction |
-| [04_gpu_parsing](./examples/04_gpu_parsing.mojo) | GPU-accelerated parsing |
-| [05_error_handling](./examples/05_error_handling.mojo) | Error handling patterns |
-| [06_struct_serde](./examples/06_struct_serde.mojo) | Struct serialization (manual traits) |
-| [07_ndjson](./examples/07_ndjson.mojo) | NDJSON parsing & streaming |
-| [08_lazy_parsing](./examples/08_lazy_parsing.mojo) | On-demand lazy parsing |
-| [09_jsonpath](./examples/09_jsonpath.mojo) | JSONPath queries |
-| [10_schema_validation](./examples/10_schema_validation.mojo) | JSON Schema validation |
-| [11_json_patch](./examples/11_json_patch.mojo) | JSON Patch & Merge Patch |
-| [12_reflection_serde](./examples/12_reflection_serde.mojo) | Zero-boilerplate reflection serde |
+| [basic/parsing](./examples/basic/parsing.mojo)               | Parse, serialize, type handling |
+| [basic/file_io](./examples/basic/file_io.mojo)               | Read/write JSON files |
+| [basic/value_types](./examples/basic/value_types.mojo)       | Type checking, value extraction |
+| [basic/error_handling](./examples/basic/error_handling.mojo) | `try` / `except` patterns and recovery |
+
+### intermediate/ -- real-world feature usage
+
+| Example | Description |
+|---------|-------------|
+| [intermediate/reflection_serde](./examples/intermediate/reflection_serde.mojo) | Zero-boilerplate struct serde via reflection |
+| [intermediate/struct_serde](./examples/intermediate/struct_serde.mojo)         | Manual `Serializable` / `Deserializable` traits |
+| [intermediate/ndjson](./examples/intermediate/ndjson.mojo)                     | NDJSON parsing & streaming |
+| [intermediate/jsonpath](./examples/intermediate/jsonpath.mojo)                 | RFC 9535 JSONPath queries |
+| [intermediate/schema_validation](./examples/intermediate/schema_validation.mojo) | JSON Schema validation |
+| [intermediate/json_patch](./examples/intermediate/json_patch.mojo)             | JSON Patch (RFC 6902) & Merge Patch (RFC 7396) |
+
+### advanced/ -- perf-focused
+
+| Example | Description |
+|---------|-------------|
+| [advanced/lazy_parsing](./examples/advanced/lazy_parsing.mojo) | On-demand lazy parsing for large documents |
+| [advanced/gpu_parsing](./examples/advanced/gpu_parsing.mojo)   | GPU-accelerated parsing (Apple-Silicon-aware) |
 
 ## Development
 

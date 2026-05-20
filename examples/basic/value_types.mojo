@@ -1,4 +1,4 @@
-# Example 03: Working with Value Types
+# Working with the Value type
 #
 # Demonstrates: Value type checking and value extraction
 

@@ -1,4 +1,4 @@
-# Example 05: Error Handling
+# Error handling for malformed JSON
 #
 # Demonstrates: Handling JSON parse errors using try/except and assert_raises
 

@@ -1,4 +1,4 @@
-# Example 07: NDJSON (Newline-Delimited JSON)
+# NDJSON (newline-delimited JSON)
 #
 # NDJSON is a format where each line is a separate JSON value.
 # Common for log files, data streams, and large datasets.

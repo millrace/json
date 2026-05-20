@@ -1,4 +1,4 @@
-# Example 09: JSONPath Queries
+# JSONPath queries (RFC 9535)
 #
 # JSONPath is a query language for JSON, similar to XPath for XML.
 # Use it to extract data from complex JSON structures.

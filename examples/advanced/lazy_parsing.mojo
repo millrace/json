@@ -1,4 +1,4 @@
-# Example 08: Lazy/On-Demand Parsing
+# Lazy / on-demand parsing for large documents
 #
 # Lazy parsing defers actual parsing until you access specific fields.
 # Useful when you only need a few fields from a large JSON document.

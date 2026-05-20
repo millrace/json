@@ -1,125 +1,103 @@
 # json Examples
 
-This directory contains examples demonstrating the json library API.
+Worked examples are organised by progression so a new reader can walk
+top-to-bottom and a returning reader can jump to the tier they need:
 
-## Running Examples
-
-From the project root directory:
-
-```bash
-# Run all examples
-pixi run examples
-
-# Run individual examples
-pixi run example-basic        # 01_basic_parsing.mojo
-pixi run example-files        # 02_file_operations.mojo
-pixi run example-value        # 03_value_types.mojo
-pixi run example-gpu          # 04_gpu_parsing.mojo (requires GPU)
-pixi run example-errors       # 05_error_handling.mojo
-pixi run example-serde        # 06_struct_serde.mojo
-pixi run example-reflection   # 12_reflection_serde.mojo
-
-# Or run directly with mojo (from project root)
-pixi run mojo -I . examples/01_basic_parsing.mojo
+```
+examples/
+├── basic/         first ten lines of code -- start here
+├── intermediate/  real-world feature usage
+├── advanced/      perf-focused (GPU, lazy)
 ```
 
-## Examples Overview
+The examples on disk are the same files we run as part of `pixi run
+tests`, so every snippet in here is known to compile and execute.
 
-### 01_basic_parsing.mojo
-Basic JSON parsing with `loads()` and `dumps()` for string-based operations.
-- Parse JSON strings into `Value` objects
-- Serialize `Value` objects back to JSON strings
-- Handle different JSON types: int, float, string, bool, null, array, object
-- Roundtrip parsing demonstration
+## Running examples
 
-### 02_file_operations.mojo
-File I/O with `load()` and `dump()` for reading/writing JSON files.
-- Read JSON from files with `load()`
-- Write JSON to files with `dump()`
-- Roundtrip file operations
+From the project root:
 
-### 03_value_types.mojo
-Working with the `Value` type and its methods.
-- Create `Value` objects directly (not from parsing)
-- Type checking: `is_null()`, `is_bool()`, `is_int()`, `is_float()`, `is_string()`, `is_array()`, `is_object()`, `is_number()`
-- Value extraction: `bool_value()`, `int_value()`, `float_value()`, `string_value()`
-- Array/object metadata: `array_count()`, `object_count()`, `object_keys()`, `raw_json()`
-- Value equality comparison
+```bash
+# Run every example in basic/ + intermediate/ + advanced/
+pixi run examples
 
-### 04_gpu_parsing.mojo
-GPU-accelerated parsing for high-performance scenarios.
-- Use `loads[target="gpu"]()` for GPU parsing
-- Use `load[target="gpu"]()` for GPU file parsing
-- Understanding when GPU parsing is beneficial (large documents)
+# Run a single example
+pixi run example-parsing            # basic/parsing.mojo
+pixi run example-files              # basic/file_io.mojo
+pixi run example-value              # basic/value_types.mojo
+pixi run example-errors             # basic/error_handling.mojo
+pixi run example-reflection         # intermediate/reflection_serde.mojo
+pixi run example-serde              # intermediate/struct_serde.mojo
+pixi run example-ndjson             # intermediate/ndjson.mojo
+pixi run example-jsonpath           # intermediate/jsonpath.mojo
+pixi run example-schema             # intermediate/schema_validation.mojo
+pixi run example-patch              # intermediate/json_patch.mojo
+pixi run example-lazy               # advanced/lazy_parsing.mojo
+pixi run example-gpu                # advanced/gpu_parsing.mojo
 
-### 05_error_handling.mojo
-Handling JSON parse errors gracefully.
-- Using try/except for error handling
-- Batch processing with error recovery
-- Examples of valid and invalid JSON
+# Or invoke mojo directly
+pixi run mojo -I . examples/basic/parsing.mojo
+```
 
-### 06_struct_serde.mojo
-Type-safe struct serialization and deserialization (manual traits).
-- Implement `Serializable` trait with `to_json()` method
-- Implement `Deserializable` trait with `from_json()` static method
-- Use `serialize()` and `deserialize[T]()` helpers
-- GPU-accelerated deserialization support
-- Full round-trip examples
+## basic/ -- first ten lines of code
 
-### 07_ndjson.mojo
-NDJSON (Newline-Delimited JSON) parsing and streaming.
-- Parse NDJSON strings with `loads[format="ndjson"]`
-- Load .ndjson files with auto-detection
-- GPU-accelerated NDJSON parsing
-- Serialize to NDJSON format
-- Stream large files with `load[streaming=True]`
+Start here if you've never used `json` before. Each example fits on
+one screen and exercises one entry point.
 
-### 08_lazy_parsing.mojo
-On-demand lazy parsing for large documents.
-- Create `LazyValue` with `loads[lazy=True]`
-- Access specific paths without parsing entire document
-- Type-specific getters: `get_string`, `get_int`, `get_bool`
-- Chain lazy access with `[]` operator
-- When to use lazy vs full parsing
+| File | What it covers |
+|------|---|
+| `basic/parsing.mojo`        | `loads()` / `dumps()` round trip, scalar & nested types |
+| `basic/file_io.mojo`        | `load()` / `dump()` for reading and writing JSON files |
+| `basic/value_types.mojo`    | The `Value` type: `is_*`, `*_value`, `array_count`, `object_keys` |
+| `basic/error_handling.mojo` | `try`/`except` patterns, batch-process with error recovery |
 
-### 09_jsonpath.mojo
-JSONPath query language for extracting data.
-- Basic path access: `$.store.name`
-- Array indexing: `[0]`, `[-1]`, `[*]`
-- Recursive descent: `$..name`
-- Filter expressions: `[?@.price>30]`
-- Array slices: `[0:2]`, `[::2]`
+Recommended order: `parsing` -> `value_types` -> `file_io` ->
+`error_handling`.
 
-### 10_schema_validation.mojo
-JSON Schema validation for data quality.
-- Type validation: string, number, integer, object, array
-- Required fields and property constraints
-- Number constraints: minimum, maximum
-- String constraints: minLength, maxLength
-- Array constraints: items, minItems, maxItems
-- Enum values and schema composition (allOf, anyOf)
+## intermediate/ -- real-world feature usage
 
-### 11_json_patch.mojo
-JSON Patch (RFC 6902) and Merge Patch (RFC 7396).
-- Operations: add, remove, replace, move, copy, test
-- Multiple operations in sequence
-- Merge Patch for simpler partial updates
-- Create diff patches between documents
+Once `loads`/`dumps` and `Value` feel natural, these examples introduce
+the typed serde paths (reflection + manual traits), NDJSON, JSONPath,
+JSON Schema, and JSON Patch. Pick whichever slice you need; they don't
+depend on each other.
 
-### 12_reflection_serde.mojo
-Zero-boilerplate struct serialization via compile-time reflection.
-- Automatic serialize/deserialize with `serialize_json()` and `deserialize_json[T]()`
-- Nested struct support (recursive reflection)
-- `Optional[T]` and `List[T]` field support
-- GPU-accelerated deserialization with `deserialize_json[T, target="gpu"]`
-- Non-raising `try_deserialize_json[T]()` returning `Optional`
-- `Value` pass-through (struct → `Value` and back)
-- Custom `JsonSerializable` / `JsonDeserializable` trait overrides
-- Rich error messages with field name and type mismatch details
+| File | What it covers |
+|------|---|
+| `intermediate/reflection_serde.mojo` | Zero-boilerplate struct serde via compile-time reflection (the path most apps want) |
+| `intermediate/struct_serde.mojo`     | Manual `Serializable` / `Deserializable` traits when you need full control |
+| `intermediate/ndjson.mojo`           | `loads[format="ndjson"]` and `load[format="ndjson"]` for line-delimited JSON |
+| `intermediate/jsonpath.mojo`         | RFC 9535 JSONPath: `$..name`, filters, slices, recursive descent |
+| `intermediate/schema_validation.mojo`| JSON Schema validation: `validate`, `is_valid`, type / range / enum constraints |
+| `intermediate/json_patch.mojo`       | RFC 6902 JSON Patch + RFC 7396 Merge Patch (`apply_patch`, `merge_patch`) |
 
+Recommended order: `reflection_serde` -> `struct_serde` -> the
+RFC-specific ones in any order.
 
-## More Information
+## advanced/ -- perf-focused
 
-- [API Reference](../docs/api.md) — Complete function reference
-- [Architecture](../docs/architecture.md) — CPU/GPU backend design
-- [Performance](../docs/performance.md) — Optimization details
+These exercise the parts of the library you only reach for once you
+have a real workload to optimise.
+
+| File | What it covers |
+|------|---|
+| `advanced/lazy_parsing.mojo` | `loads[lazy=True]` + `LazyValue`: type-specific getters, path-based access, when lazy beats full parse |
+| `advanced/gpu_parsing.mojo`  | `loads[target="gpu"]` / `load[target="gpu"]`: GPU pipeline, when GPU wins, Apple-Silicon caveat |
+
+`advanced/gpu_parsing.mojo` is platform-aware:
+
+- On Linux / NVIDIA / AMD it runs the real GPU pipeline.
+- On Apple Silicon it prints a guidance message instead of crashing,
+  because Mojo's Metal backend currently lacks raw-pointer kernel
+  support. Recompile with
+  `-D JSON_GPU_ALLOW_APPLE_FALLBACK=1` (or run `pixi run example-gpu`,
+  which sets the flag for you) to exercise the path under the silent
+  CPU fallback shim.
+
+## Discovering more
+
+- [`docs/api.md`](../docs/api.md) -- complete function reference.
+- [`docs/architecture.md`](../docs/architecture.md) -- how the
+  parser, `Document` / `Tape`, and the CPU / GPU backends fit
+  together.
+- [`docs/performance.md`](../docs/performance.md) -- benchmark
+  numbers and tuning notes.

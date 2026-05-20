@@ -1,4 +1,4 @@
-# Example 10: JSON Schema Validation
+# JSON Schema validation
 #
 # Validate JSON documents against schemas to ensure data quality.
 # Supports a subset of JSON Schema draft-07.

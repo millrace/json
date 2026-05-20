@@ -1,4 +1,4 @@
-# Example 02: File Operations
+# File I/O: load() and dump()
 #
 # Demonstrates: load() and dump() for file-based JSON operations
 
