@@ -34,6 +34,36 @@ var logs = load[format="ndjson"]("events.ndjson")  # Returns List[Value]
 var big = load[target="gpu"]("large.json")
 ```
 
+### One-line prelude
+
+For everyday code, `json.prelude` re-exports the names you reach for
+all the time -- `loads`, `dumps`, `load`, `dump`, `Value`, `Null`,
+`ParserConfig`, `SerializerConfig`, and the reflection serde
+shortcuts. The canonical import block collapses to one line:
+
+```mojo
+from json.prelude import *
+
+@fieldwise_init
+struct Person(Defaultable, Movable):
+    var name: String
+    var age:  Int
+    def __init__(out self):
+        self.name = ""
+        self.age = 0
+
+def main() raises:
+    var p = deserialize_json[Person]('{"name":"Alice","age":30}')
+    print(p.name, p.age)
+    print(dumps(serialize_value(p), indent="  "))
+```
+
+Domain-specific surfaces (jsonpath / patch / schema / lazy / streaming
+/ manual serde traits / simdjson FFI) are intentionally **not** in the
+prelude -- import those from the matching module so the import block
+of a real file still documents which features it actually uses. See
+[`json/prelude.mojo`](./json/prelude.mojo) for the exact list.
+
 ## Installation
 
 Add json to your project's `pixi.toml`:
@@ -210,26 +240,104 @@ pixi run tests-cpu           # or: tests-gpu / tests-e2e / tests-e2e-gpu
 pixi run bench-gpu           # optional; builds and runs the GPU benchmark
 ```
 
-Tasks that need extra tooling (docs, formatters, dataset downloaders)
-live in the `dev` feature. Pass `-e dev` or enter a dev shell:
+### Pixi environments
+
+The project layers three environments; pick the one that matches the
+job you're doing.
+
+| Env       | What's in it                                                | When to use it                                                                |
+|-----------|-------------------------------------------------------------|-------------------------------------------------------------------------------|
+| `default` | mojo, simdjson, gxx, sysroot (Linux)                        | Run the library, run tests, run examples. End users stop here.                |
+| `dev`     | `default` + python, gdown, pre-commit, mojodoc, sysroot pin | Format, build docs, build benchmark binaries, AOT sanitizer builds, datasets. |
+| `fuzz`    | `dev` + mozz                                                | Run mozz fuzz harnesses against the FFI / parser / access surfaces.           |
+
+Switch envs by passing `-e <name>` to `pixi run`, or enter a shell with
+`pixi shell -e <name>`. Tasks defined only in a non-default env auto-route
+when there is no ambiguity, but explicit `-e` is always safe.
+
+### Common dev tasks
 
 ```bash
-pixi run -e dev format       # mojo format + pre-commit hook install
-pixi run -e dev format-check # used by CI
-pixi run -e dev docs         # mojodoc + open in browser
-pixi run -e dev docs-build   # build into target/doc (used by Pages workflow)
+pixi run -e dev format          # mojo format + pre-commit hook install
+pixi run -e dev format-check    # used by CI
+pixi run -e dev docs            # mojodoc + open in browser
+pixi run -e dev docs-build      # build into target/doc (used by Pages workflow)
 pixi run -e dev download-twitter-large  # gdown cuJSON benchmark datasets
 ```
 
-`pixi run <task>` without `-e` auto-routes dev-only tasks to the dev env
-when the task is not defined in the default env. End users consuming the
-library as a package never need the `dev` feature.
+### Sanitizer testing (ASan)
+
+A curated, FFI- and lifetime-heavy slice of the test suite is
+exercised under LLVM AddressSanitizer to catch use-after-free,
+out-of-bounds, and lifetime regressions in the simdjson FFI shim, the
+tape-backed `Document` / `Value` view, and the COW mutation path.
+Driven by [`tools/run_sanitizer_tests.sh`](./tools/run_sanitizer_tests.sh).
+
+```bash
+pixi run -e dev tests-asan      # AOT-build with --sanitize address, run, fail-fast
+pixi run -e dev tests-asan tests/test_value.mojo   # one file
+```
+
+> **macOS note.** Mojo's bundled libasan expects
+> `__asan_version_mismatch_check_v8`; the system clang on Apple
+> Silicon ships `__asan_version_mismatch_check_apple_clang_1700`. The
+> harness detects this and skips cleanly with a clear message, so a
+> dev-box `pixi run tests-asan` doesn't fail. Linux CI runs the full
+> harness end-to-end.
+
+### Fuzz testing (mozz)
+
+Mozz harnesses live in [`fuzz/`](./fuzz/) and exercise:
+
+- `fuzz-loads` -- the default Mojo two-pass parser, with a
+  parse -> dumps -> parse idempotence property.
+- `fuzz-simdjson` -- the simdjson FFI boundary
+  (`OwnedDLHandle` + `external_call`), with a differential property
+  that the simdjson and Mojo native parsers must agree on canonical
+  `dumps` output when both succeed.
+- `fuzz-value-access` -- the `Value` access API + COW mutation.
+- `fuzz-jsonpath` -- the RFC 9535 JSONPath engine.
+- `fuzz-ndjson` -- the `loads[format='ndjson']` line splitter.
+
+```bash
+pixi run -e fuzz fuzz-simdjson  # 200k iters; locks crash repros under .mozz_crashes/
+pixi run -e fuzz fuzz-all       # run every harness back-to-back
+```
+
+The `fuzz/corpus/<harness>/` directory is gitignored and populated at
+runtime; copy interesting crashes there manually to lock in
+regressions.
+
+### GPU on Apple Silicon
+
+Mojo's Metal backend currently rejects the raw-pointer kernels the
+GPU pipeline relies on (`Metal Compiler failed to compile metallib`).
+The library handles this honestly: `loads[target='gpu']` raises by
+default on Apple Silicon, and recompiling with
+`-D JSON_GPU_ALLOW_APPLE_FALLBACK=1` opts back into the silent CPU
+fallback. The pixi tasks set this flag for the cases where it makes
+sense:
+
+| Task                  | Apple Silicon behaviour                                                         |
+|-----------------------|---------------------------------------------------------------------------------|
+| `tests-gpu`           | Builds + runs (21 / 21 pass under the fallback flag)                            |
+| `tests-e2e-gpu`       | Builds + runs (38 / 38 pass under the fallback flag)                            |
+| `example-gpu`         | Runs end-to-end under the fallback flag                                         |
+| `bench-gpu`           | Skips with a clean "Metal lacks raw-pointer kernel support" message, exits 0    |
+
+On Linux + NVIDIA / AMD the flag is harmless and the real GPU path is
+taken before the fallback gate.
+
+`pixi run <task>` without `-e` auto-routes dev / fuzz tasks to the
+matching env when the task is unambiguous. End users consuming the
+library as a package never need the `dev` or `fuzz` features.
 
 Further documentation:
 
 - [Architecture](./docs/architecture.md): CPU/GPU backend design
 - [Performance](./docs/performance.md): optimization deep dive
 - [Benchmarks](./benchmark/README.md): reproducible benchmarks
+- [Examples guided tour](./examples/README.md): basic / intermediate / advanced
 
 ## License
 

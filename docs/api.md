@@ -20,6 +20,44 @@ var logs = load[format="ndjson"]("events.ndjson")  # List[Value]
 var big = load[target="gpu"]("large.json")
 ```
 
+## `json.prelude` -- one-line import for everyday code
+
+`json.prelude` re-exports the names a typical module reaches for, so
+the standard import block becomes a single line:
+
+```mojo
+from json.prelude import *
+
+var data = loads('{"name": "Alice"}')
+print(dumps(data, indent="  "))
+```
+
+The exact set of re-exports is intentionally small:
+
+| Symbol                                                                            | From                |
+|-----------------------------------------------------------------------------------|---------------------|
+| `loads`, `load`                                                                   | `json.parser`       |
+| `dumps`, `dump`                                                                   | `json.serialize`    |
+| `ParserConfig`, `SerializerConfig`                                                | `json.config`       |
+| `Value`, `Null`                                                                   | `json.value`        |
+| `serialize_json`, `serialize_value`, `deserialize_json`, `deserialize_value`,     |                     |
+| `try_deserialize_json`, `JsonSerializable`, `JsonDeserializable`                  | `json.reflection`   |
+
+Domain-specific surfaces are deliberately **not** re-exported -- the
+prelude stays small enough that the import block of a real module
+still documents which features it actually uses. Import directly:
+
+| Surface                                                                              | Import from           |
+|--------------------------------------------------------------------------------------|-----------------------|
+| `jsonpath_query`, `jsonpath_one`                                                     | `json.jsonpath`       |
+| `apply_patch`, `merge_patch`, `create_merge_patch`                                   | `json.patch`          |
+| `validate`, `is_valid`, `ValidationResult`, `ValidationError`                        | `json.schema`         |
+| `LazyValue`                                                                          | `json.lazy`           |
+| `StreamingParser`, `ArrayStreamingParser`                                            | `json.streaming`      |
+| `Serializable`, `to_json_value`, `to_json_string`                                    | `json.serialize`      |
+| `Deserializable`, `get_int`, `get_string`, `get_bool`, `get_float`                   | `json.deserialize`    |
+| `SimdjsonFFI`                                                                        | `json.cpu.simdjson_ffi` |
+
 ## loads() - Parse Strings
 
 ```mojo
