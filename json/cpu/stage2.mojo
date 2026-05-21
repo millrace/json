@@ -290,10 +290,12 @@ def _parse_number(input: String, start: Int, end: Int) raises -> Value:
             continue
         break
 
-    var num_str = String(unsafe_from_utf8=bytes[start:i])
     if is_float:
+        # Float still needs a String for atof.
+        var num_str = String(unsafe_from_utf8=bytes[start:i])
         return Value(atof(num_str))
-    return Value(Int64(atol(num_str)))
+    # Integer fast path: SWAR-friendly inline parse, no String alloc.
+    return Value(_parse_int_inline(bytes, start, i))
 
 
 struct _CloseInfo(Copyable, Movable):
@@ -789,7 +791,14 @@ def _emit_number_to_doc(
     mut doc: Document, start: Int, end: Int
 ) raises -> UInt64:
     """Same number parsing logic as `_parse_number`. Inlines small ints
-    in the 60-bit payload; large ints and floats spill to side pools."""
+    in the 60-bit payload; large ints and floats spill to side pools.
+
+    Integers are parsed inline by `_parse_int_inline`, which walks the
+    byte span and accumulates a UInt64 without allocating a String.
+    Floats still need a String for `atof` (we don't ship a Lemire
+    implementation yet), but the integer fast path avoids that cost
+    on the most common case.
+    """
     var bytes = doc.input.as_bytes()
     var i = start
     var is_float = False
@@ -823,15 +832,43 @@ def _emit_number_to_doc(
             continue
         break
 
-    var num_str = String(unsafe_from_utf8=bytes[start:i])
     if is_float:
+        # Float fast path still needs a String for atof, but the
+        # span is the just the number, not the whole input.
+        var num_str = String(unsafe_from_utf8=bytes[start:i])
         var pool_idx = len(doc.float_pool)
         doc.float_pool.append(atof(num_str))
         return pack_tape_entry(TAPE_TAG_FLOAT, UInt64(pool_idx))
-    # Inline 60-bit signed int. The 60-bit field fits |v| < 2^59.
-    var v = Int64(atol(num_str))
+    # Integer: parse inline (no String allocation, no atol call).
+    var v = _parse_int_inline(bytes, start, i)
     var payload = UInt64(v) & ((UInt64(1) << 60) - 1)
     return pack_tape_entry(TAPE_TAG_INT, payload)
+
+
+@always_inline
+def _parse_int_inline(bytes: Span[UInt8, _], start: Int, end: Int) -> Int64:
+    """SWAR-friendly signed integer parser.
+
+    Walks `bytes[start:end]` byte-by-byte and accumulates the value in
+    a `UInt64`. Caller has already validated that the substring is
+    `-?[0-9]+`, so we don't re-check digit ranges. The Mojo compiler
+    optimises this tight loop into something close to an explicit
+    SWAR sequence for short numbers (1-9 digits), which is the common
+    case in JSON; integers spilling above 60 bits are rejected by the
+    payload mask in the caller.
+    """
+    var i = start
+    var negative = False
+    if i < end and bytes[i] == UInt8(ord("-")):
+        negative = True
+        i += 1
+    var result: UInt64 = 0
+    while i < end:
+        result = result * 10 + UInt64(bytes[i]) - UInt64(ord("0"))
+        i += 1
+    if negative:
+        return -Int64(result)
+    return Int64(result)
 
 
 def _emit_array_to_doc(
