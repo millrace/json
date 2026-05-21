@@ -10,7 +10,7 @@ High-performance JSON library for Mojo with GPU acceleration.
 - **Reflection serde:** zero-boilerplate struct serialization via compile-time reflection
 - **GPU accelerated:** 2-4x faster than [cuJSON](https://github.com/AutomataLab/cuJSON) on large files (NVIDIA, AMD)
 - **Tape-backed Value:** v0.2 stores parsed JSON as a packed tape inside a `Document`; `Value` is a view; nested mutation propagates correctly
-- **Two-pass CPU parser:** stage 1 builds a structural index (scalar oracle + SIMD), stage 2 walks it; ~1.4 GB/s, zero FFI
+- **Two-pass CPU parser:** stage 1 builds a structural index (scalar oracle + SIMD), stage 2 walks it; **~1.2 GB/s on `twitter.json` / 0.7 GB/s on the 804 MB record-shaped corpus** (Apple Silicon, M-series), zero FFI
 - **Streaming and lazy parsing:** handle files larger than memory
 - **JSONPath and Schema:** query and validate JSON documents
 - **RFC compliant:** JSON Patch, Merge Patch, JSON Pointer
@@ -108,6 +108,24 @@ json = { git = "https://github.com/ehsanmok/json.git", branch = "main" }
 
 *GPU only beneficial for files >100MB.*
 
+### CPU (Apple Silicon, M-series)
+
+`pixi run bench-cpu <file>` runs the C++ `simdjson` reference and the
+three Mojo CPU paths back-to-back.
+
+| File | Size | simdjson C++ | Mojo simd (default) | Mojo scalar | Mojo tape (eager) |
+|---|---|---|---|---|---|
+| `twitter.json` | 617 KB | 2.66 GB/s | **1.18 GB/s** | 0.60 GB/s | 0.23 GB/s |
+| `citm_catalog.json` | 1.7 MB | 3.13 GB/s | **1.33 GB/s** | 0.62 GB/s | 0.23 GB/s |
+| `twitter_large_record.json` | 804 MB | 1.47 GB/s | **0.73 GB/s** | 0.51 GB/s | 0.15 GB/s |
+
+The default `loads(target='cpu')` is **~50 % of native simdjson** in
+pure Mojo with zero FFI. The `tape` row is the eager
+`-D JSON_USE_TAPE_VALUE=1` path -- it's slower under bench's
+`parse + access top-level` workload because it materialises the whole
+`Document` upfront, but free for code that traverses everything
+afterwards.
+
 ```bash
 # Download large dataset first (required for meaningful GPU benchmarks).
 # `download-*` lives in the dev feature because it needs gdown, so pass -e dev.
@@ -115,6 +133,11 @@ pixi run -e dev download-twitter-large
 
 # Run GPU benchmark (only use large files)
 pixi run bench-gpu benchmark/datasets/twitter_large_record.json
+
+# CPU bench: simdjson C++ vs Mojo simd / scalar / tape
+pixi run -e dev bench-cpu                                            # twitter.json
+pixi run -e dev bench-cpu benchmark/datasets/citm_catalog.json
+pixi run -e dev bench-cpu benchmark/datasets/twitter_large_record.json
 ```
 
 ## Reflection-Based Serde (Zero Boilerplate)

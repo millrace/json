@@ -72,13 +72,19 @@ bytes for structure.
   scalar produce byte-identical position lists, including a
   full-document run against the benchmark corpora.
 
-**Performance (Apple M3 Pro):**
+**Performance (Apple Silicon, M-series; `pixi run -e dev bench-cpu`):**
 
-| Corpus | Size | Scalar | SIMD | Speedup |
-|---|---|---|---|---|
-| `twitter.json` | 616 KB | 0.60 GB/s | 1.24 GB/s | 2.07x |
-| `citm_catalog.json` | 1.7 MB | 0.64 GB/s | 1.38 GB/s | 2.17x |
-| `twitter_large_record.json` | 804 MB | 0.51 GB/s | 0.75 GB/s | 1.46x |
+| Corpus | Size | Scalar | SIMD | Tape (`-D JSON_USE_TAPE_VALUE=1`) | simdjson C++ |
+|---|---|---|---|---|---|
+| `twitter.json` | 617 KB | 0.60 GB/s | **1.18 GB/s** | 0.23 GB/s | 2.66 GB/s |
+| `citm_catalog.json` | 1.7 MB | 0.62 GB/s | **1.33 GB/s** | 0.23 GB/s | 3.13 GB/s |
+| `twitter_large_record.json` | 804 MB | 0.51 GB/s | **0.73 GB/s** | 0.15 GB/s | 1.47 GB/s |
+
+The bench measures `parse + access top-level`. The lazy
+`simd`/`scalar` paths only deserialise what the caller actually
+inspects, while the eager `tape` path materialises the whole
+`Document` -- so under this workload `tape` looks slower, but it pays
+for itself when the program then iterates every value.
 
 **Usage:**
 ```mojo
@@ -94,7 +100,9 @@ var data = loads('{"key": "value"}')  # default
 - `json/cpu/simdjson_ffi/` -- C++ wrapper
 - `json/cpu/simdjson_ffi.mojo` -- Mojo FFI bindings
 
-**Performance:** ~0.48 GB/s (on twitter.json)
+**Performance:** ~0.48 GB/s on `twitter.json` -- the FFI marshalling is
+the bottleneck here; if you want the simdjson algorithm without the
+FFI tax, use the default Mojo simd path instead.
 
 **Usage:**
 ```mojo

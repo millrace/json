@@ -129,14 +129,36 @@ GPU parallelism shines with large files where the overhead is amortized.
 
 ## CPU Performance
 
-json has two CPU backends:
+json has three CPU code paths, all served by `loads(target='cpu')`:
 
-| Backend | Throughput | Notes |
-|---------|------------|-------|
-| **Mojo (native)** | **1.31 GB/s** | Default, zero FFI, fastest |
-| simdjson (FFI) | 0.48 GB/s | Requires libsimdjson |
+| Path | What it does | When to use |
+|---|---|---|
+| **simd** (default) | SIMD stage 1 structural index + lazy `Value` (scans only the bytes the caller actually inspects) | Default. Best for partial reads (`v["users"][0]["name"]`). |
+| **scalar** | Scalar stage 1 + same lazy `Value` | Fallback / debugging. Slightly slower. |
+| **tape** (`-D JSON_USE_TAPE_VALUE=1`) | SIMD stage 1 + tape-emitting stage 2 (eager `Document`) | When the workload traverses everything. Slower for `bench[v.is_object()]`-style probes because it materialises the whole document up front. |
+| simdjson (FFI) | C++ simdjson via the `target='cpu-simdjson'` shim | When you need an extra reference parser at the cost of FFI marshalling. |
 
-The pure Mojo backend is **~2.7x faster** than FFI due to eliminating marshalling overhead.
+### Real numbers (Apple Silicon, M-series, this dev box)
+
+`pixi run bench-cpu <file>` runs `simdjson` C++ first, then the three Mojo
+variants in one Bench table.
+
+| File | Size | simdjson C++ | Mojo simd (lazy) | Mojo scalar | Mojo tape (eager) |
+|---|---|---|---|---|---|
+| `twitter.json` | 617 KB | 2.66 GB/s | **1.18 GB/s** | 0.60 GB/s | 0.23 GB/s |
+| `citm_catalog.json` | 1.7 MB | 3.13 GB/s | **1.33 GB/s** | 0.62 GB/s | 0.23 GB/s |
+| `twitter_large_record.json` | 804 MB | 1.47 GB/s | **0.73 GB/s** | 0.51 GB/s | 0.15 GB/s |
+
+Headline: on small/medium DOM-bound payloads the Mojo SIMD path runs at
+**~40–50 % of native simdjson** in pure Mojo, with no FFI; on the 804 MB
+record-shaped corpus it lands at **~50 % of simdjson** (`0.73` vs
+`1.47` GB/s). The tape path is intentionally eager — it pays parse-time
+cost once so the `Document` is fully materialised, which makes it
+slower under the bench's "parse + access top-level" workload but
+roughly free for code that traverses everything afterwards.
+
+The Mojo simd path is **~2× faster than the simdjson FFI shim** on this
+hardware because it sidesteps the marshalling round-trip entirely.
 
 ## When to Use GPU vs CPU
 
