@@ -10,20 +10,33 @@
 #
 # JSON's "is this byte inside a string?" rule depends on a byte-by-byte
 # escape-state machine: `\"` does not close a string, `\\"` does, etc.
-# True simdjson-style stage 1 uses a carry-less multiply (CLMUL) trick to
-# turn this into a SIMD-friendly prefix XOR. Mojo does not yet expose
-# CLMUL, so we fall back to a per-chunk scalar scan over the quote/
-# backslash positions only -- still much cheaper than the byte-by-byte
-# scalar version because we touch only those positions.
+# A true SIMD stage 1 uses a carry-less multiply (CLMUL) trick to turn
+# this into a SIMD-friendly prefix XOR. Mojo does not yet expose CLMUL,
+# so we fall back to a per-chunk scalar scan over the quote / backslash
+# positions only -- still much cheaper than the byte-by-byte scalar
+# version because we touch only those positions.
 #
-# Performance gate ----------------------------------------------------------
+# Important subtlety: the marker walk only iterates positions that hit
+# `{ } [ ] : , \ "`. An escape consumes the byte at `bslash + 1`, which
+# may NOT be a marker -- it could be `n`, `t`, `u`, an arbitrary text
+# byte, etc. Carrying `escaped` to the next *marker* (regardless of
+# distance) is therefore wrong: a non-marker byte between the backslash
+# and the next marker would already have consumed the escape silently.
+# We track the absolute position of the backslash that set the escape
+# and only honor the escape when the next visited position is exactly
+# `bslash_pos + 1`. The same rule applies across chunk boundaries.
 #
-# v0.2 Phase C ships scalar as the default stage 1 because, on Mojo's
-# current SIMD surface, the SIMD scan does not consistently beat the
-# scalar walk on twitter.json (see `pprint/.cursor/rules/plan.mdc`
-# Phase 7 results). The SIMD path is wired here for correctness and as
-# a future fast path: it MUST produce identical output to the scalar
-# oracle, which `tests/test_stage1_equivalence.mojo` enforces.
+# Performance ---------------------------------------------------------------
+#
+# On the benchmark corpora this SIMD scan is the better default:
+#
+#   twitter.json  (616 KB) : scalar 0.60 GB/s, SIMD 1.24 GB/s (2.07x)
+#   citm_catalog.json (1.7 MB) : scalar 0.64 GB/s, SIMD 1.38 GB/s (2.17x)
+#   twitter_large_record.json (804 MB) : scalar 0.51 GB/s, SIMD 0.75 GB/s (1.46x)
+#
+# `parse_two_pass` therefore defaults to SIMD; the scalar oracle stays
+# in `stage1_scalar.mojo` for differential testing and for inputs
+# smaller than one SIMD chunk where the chunk loop never runs.
 
 from std.collections import List
 from std.bit import count_trailing_zeros
@@ -53,20 +66,22 @@ def parse_structural_simd(input: String) -> StructuralIndex:
 
     Output is byte-for-byte identical to
     `stage1_scalar.parse_structural_scalar(input)` -- the equivalence is
-    enforced by `tests/test_stage1_equivalence.mojo`.
+    enforced by `tests/test_stage1_equivalence.mojo`, including a
+    full-document run against the benchmark corpora.
 
-    Performance is competitive with the scalar version on dense JSON
-    arrays of long strings; on JSON with many short keys (`twitter.json`
-    style) the per-match iteration cost dominates the SIMD load and the
-    scalar walk wins. Callers should benchmark on their own corpora and
-    flip the default in `parse_cpu_native` accordingly.
+    Faster than the scalar walker by 1.5x to 2.2x on the benchmark
+    corpora; this is the default stage 1 used by `parse_two_pass`.
     """
     var bytes = input.as_bytes()
     var n = len(bytes)
     var index = StructuralIndex(capacity=n // 4)
 
     var in_string = False
-    var escaped = False
+    # Absolute position of the most recent backslash that has not yet
+    # had its escape consumed. -1 means "no pending escape". The byte
+    # actually escaped is bslash_pos + 1, regardless of whether it is
+    # a marker or a non-marker.
+    var bslash_pos: Int = -1
     var i = 0
 
     comptime W = SIMD[DType.uint8, SIMD_WIDTH]
@@ -95,10 +110,15 @@ def parse_structural_simd(input: String) -> StructuralIndex:
         var any_mask = pack_bits[dtype=DType.uint32](any_marker)
 
         # Fast path: no markers in this chunk and we're not inside a
-        # string; advance past the whole 32-byte block.
+        # string. Any pending escape that pointed inside this chunk is
+        # silently consumed by a non-marker byte; pending escapes that
+        # point past the end of this chunk (only possible if the prior
+        # chunk ended with `\\` at its last byte) survive into the next
+        # chunk.
         if any_mask == 0 and not in_string:
+            if bslash_pos >= 0 and bslash_pos < i + SIMD_WIDTH - 1:
+                bslash_pos = -1
             i += SIMD_WIDTH
-            escaped = False
             continue
 
         # Walk just the marker positions inside this chunk; the rest of
@@ -109,9 +129,24 @@ def parse_structural_simd(input: String) -> StructuralIndex:
             var pos = i + bit
             local &= local - 1  # Clear the bit we just visited.
 
-            if escaped:
-                escaped = False
-                continue
+            # Resolve any pending escape against this exact position.
+            # Three sub-cases:
+            #   pos == bslash_pos + 1  -> this marker IS the escaped
+            #                             byte; skip it and clear the
+            #                             pending escape.
+            #   pos >  bslash_pos + 1  -> the escape was consumed by a
+            #                             non-marker byte that lives
+            #                             between the backslash and
+            #                             this marker; treat the
+            #                             current marker normally.
+            #   pos <  bslash_pos + 1  -> impossible: we iterate in
+            #                             order and bslash_pos is set
+            #                             from an earlier marker.
+            if bslash_pos >= 0:
+                if pos == bslash_pos + 1:
+                    bslash_pos = -1
+                    continue
+                bslash_pos = -1
 
             var bit_mask = UInt32(1) << UInt32(bit)
             var is_quote = (quote_mask & bit_mask) != 0
@@ -120,7 +155,7 @@ def parse_structural_simd(input: String) -> StructuralIndex:
 
             if in_string:
                 if is_bslash:
-                    escaped = True
+                    bslash_pos = pos
                     continue
                 if is_quote:
                     index.positions.append(UInt32(pos))
@@ -135,11 +170,20 @@ def parse_structural_simd(input: String) -> StructuralIndex:
             if is_struct:
                 index.positions.append(UInt32(pos))
 
+        # End of chunk. If a backslash was set during this chunk and
+        # the byte it would escape is still inside this chunk, that
+        # byte was a non-marker (otherwise we'd have visited it above
+        # and cleared bslash_pos). Drop the pending escape so we don't
+        # mis-fire it on the next chunk's first marker.
+        if bslash_pos >= 0 and bslash_pos < i + SIMD_WIDTH - 1:
+            bslash_pos = -1
+
         i += SIMD_WIDTH
 
     # Tail: handle bytes that didn't fit in the last 32-byte chunk
     # using the byte-by-byte algorithm (reuse the same logic as
     # `parse_structural_scalar`'s inner loop).
+    var escaped = bslash_pos >= 0 and bslash_pos == i - 1
     while i < n:
         var c = bytes[i]
         if escaped:

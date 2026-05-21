@@ -4,8 +4,9 @@
 #   - `parse_cpu_native` (default): two-pass stage 1 + stage 2 walker.
 #       Stage 1 has scalar (`stage1_scalar`) and SIMD (`stage1`)
 #       implementations; both are byte-identical, enforced by
-#       `tests/test_stage1_equivalence.mojo`. Default is scalar; opt
-#       into SIMD with `parse_cpu_native[force_scalar=False]`.
+#       `tests/test_stage1_equivalence.mojo`. Default is SIMD (1.5x
+#       to 2.2x faster on the benchmark corpora); opt into the scalar
+#       oracle with `parse_cpu_native[force_scalar=True]`.
 #   - simdjson FFI: optional C++ backend, exposed via `SimdjsonFFI`
 #       and selected with `loads[target='cpu-simdjson']`.
 #
@@ -58,13 +59,14 @@ from .stage1 import parse_structural_simd
 from .stage2 import parse_with_index, parse_two_pass
 
 
-def parse_cpu_native[force_scalar: Bool = True](s: String) raises -> Value:
-    """v0.2 two-pass CPU parser.
+def parse_cpu_native[force_scalar: Bool = False](s: String) raises -> Value:
+    """Two-pass CPU parser.
 
     Parameters:
-        force_scalar: When True (default), use the scalar stage 1
-            oracle. Set to False to use the SIMD stage 1 implementation
-            (for benchmarking or on workloads that favor SIMD).
+        force_scalar: When False (default), use the SIMD stage 1
+            implementation; on the benchmark corpora SIMD is 1.5x
+            to 2.2x faster than the scalar walker. Set to True to
+            force the scalar oracle (useful for differential testing).
 
     Args:
         s: JSON input string.

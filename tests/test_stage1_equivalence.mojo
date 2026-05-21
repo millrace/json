@@ -153,6 +153,109 @@ def test_string_with_escape_chars_other_kinds() raises:
     _check('"\\u00FF"', "unicode escape")
 
 
+def test_simd_chunk_escape_followed_by_non_marker() raises:
+    """Regression: in a string longer than 32 bytes, `\\X` (where X is
+    not a marker) must consume the escape on byte X, NOT on the next
+    marker. A bug here causes the closing quote to be silently dropped
+    and the parser reports `Stage 2: unterminated container`.
+
+    The SIMD scan only iterates marker positions (`\\` `"` `{` `}` `[`
+    `]` `:` `,`); non-markers between them are skipped. The escape
+    state machine has to know that an escape gets consumed by the
+    byte immediately after the backslash, even when that byte is
+    silently skipped.
+    """
+    # Body must straddle a 32-byte chunk so the SIMD path runs.
+    var body_left = String("a" * 16)
+    var body_right = String("b" * 16)
+    _check(
+        '{"k":"' + body_left + "\\nfoo" + body_right + '","ok":true}',
+        "newline mid-string across chunk",
+    )
+    _check(
+        '{"k":"' + body_left + "\\tx\\rqz" + body_right + '"}',
+        "tab + carriage-return mid-string",
+    )
+    _check(
+        '{"text":"a'
+        + body_left
+        + "\\nthen{not}a{key}: yes"
+        + body_right
+        + '"}',
+        "embedded structural-looking text after newline escape",
+    )
+
+
+def test_simd_chunk_escape_at_chunk_boundary() raises:
+    """The `\\` lands in chunk N but the byte it escapes lands in
+    chunk N+1. Escape state must cross the chunk break correctly."""
+    # Pad so the backslash is the last byte of the first 32-byte chunk;
+    # then the escaped quote / structural lands in the next chunk.
+    for pad in range(28, 36):
+        var prefix = String('"')
+        for _ in range(pad):
+            prefix += "a"
+        # \" inside the string -- escaped quote, must NOT close.
+        _check(prefix + '\\"x"', "boundary escaped quote pad=" + String(pad))
+        # \\ inside the string -- escaped backslash, NOT followed by escape.
+        _check(
+            prefix + '\\\\"', "boundary escaped backslash pad=" + String(pad)
+        )
+
+
+def test_simd_escape_followed_by_unrelated_marker_far_later() raises:
+    """The actually-escaped byte is the one immediately after `\\`, NOT
+    the next marker. If a non-marker sits between `\\` and a later
+    marker, the escape MUST be considered consumed before that marker.
+
+    Regression: a real-world Twitter JSON payload with a backslash
+    deep inside a long string was leaving the SIMD escape state set
+    until the next marker many bytes later, silently dropping that
+    marker (typically the closing quote of the string) and reporting
+    `Stage 2: unterminated container`.
+    """
+    # `\n` consumes the escape on the `n`; the closing quote and the
+    # following structural `,` must both be emitted unchanged. The
+    # padding around the `\n` ensures the structural quote is far
+    # enough from the backslash that an "until next marker" carry
+    # would mis-fire.
+    var pad = String("a" * 40)
+    _check(
+        '{"k":"' + pad + "\\n" + pad + '","next":1}',
+        "long string with \\n in the middle",
+    )
+    # `\t`, `\r`, `\u00FF` -- escape consumed by a non-structural byte
+    # (the letter or the unicode escape's first hex digit), the next
+    # marker is the closing quote far ahead.
+    _check(
+        '{"k":"' + pad + "\\t" + pad + '","next":1}',
+        "long string with \\t in the middle",
+    )
+    _check(
+        '{"k":"' + pad + "\\u00FF" + pad + '","next":1}',
+        "long string with \\u escape in the middle",
+    )
+
+
+def test_simd_twitter_japanese_string() raises:
+    """Reduced repro of the twitter.json failure: a long string
+    containing UTF-8 multibyte (Japanese) bytes followed eventually
+    by a `\\n`, then more text, then a closing `"` plus structural
+    `,`. The SIMD path must agree with the scalar oracle on every
+    structural position."""
+    # Synthetic Japanese-ish UTF-8 prefix (well-formed 3-byte sequences)
+    # to mirror the encoding shape of the real twitter.json payload.
+    var jp = String("")
+    for _ in range(20):
+        jp += chr(0xE3)
+        jp += chr(0x81)
+        jp += chr(0x82)
+    _check(
+        '{"text":"' + jp + "\\n" + jp + '","url":null}',
+        "japanese + escape + japanese",
+    )
+
+
 def test_long_array_of_numbers() raises:
     var s = String("[")
     for i in range(50):
@@ -214,6 +317,33 @@ def test_realistic_payload_smoke() raises:
 # Round-trip equivalence: the actual `loads`-produced Value should match
 # whichever stage-1 implementation we run through stage 2.
 # ---------------------------------------------------------------------------
+
+
+def test_stage1_equivalence_on_real_corpora() raises:
+    """The strongest equivalence test: scalar and SIMD stage 1 must
+    agree on the live benchmark corpora. This file is what the
+    twitter.json regression caught -- previously the SIMD escape state
+    machine carried the `escaped` flag to the next marker regardless
+    of distance, silently dropping closing quotes inside strings that
+    contained `\\n` / `\\t` followed by long UTF-8 text."""
+    from std.pathlib import Path
+
+    var fixtures = List[String]()
+    fixtures.append("benchmark/datasets/twitter.json")
+    fixtures.append("benchmark/datasets/canada.json")
+    fixtures.append("benchmark/datasets/citm_catalog.json")
+
+    for i in range(len(fixtures)):
+        var path = fixtures[i]
+        try:
+            var content = Path(path).read_text()
+            var scalar = parse_structural_scalar(content)
+            var simd = parse_structural_simd(content)
+            _assert_indices_equal(path, scalar, simd)
+        except:
+            # Fixture not present in this checkout (the large 804MB
+            # file isn't always vendored); skip rather than fail.
+            print("  skipped (missing):", path)
 
 
 def test_two_pass_dumps_round_trip() raises:

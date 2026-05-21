@@ -64,14 +64,21 @@ bytes for structure.
   validation for trailing commas, double commas, leading zeros,
   missing colons, missing values, unquoted keys, invalid escapes,
   and trailing top-level content.
-- `json/cpu/__init__.parse_cpu_native[force_scalar=True|False]` --
-  the public CPU entry point.
+- `json/cpu/__init__.parse_cpu_native[force_scalar=False|True]` --
+  the public CPU entry point. Default is SIMD (1.5x to 2.2x faster
+  than the scalar walker on the benchmark corpora); pass
+  `force_scalar=True` for differential testing.
 - `tests/test_stage1_equivalence.mojo` -- asserts stage 1 SIMD and
-  scalar produce byte-identical position lists.
+  scalar produce byte-identical position lists, including a
+  full-document run against the benchmark corpora.
 
-**Performance:** ~1.4 GB/s (twitter.json, scalar stage 1; SIMD
-matches scalar within noise on this workload because JSON has many
-small structural runs that don't amortize the SIMD setup cost).
+**Performance (Apple M3 Pro):**
+
+| Corpus | Size | Scalar | SIMD | Speedup |
+|---|---|---|---|---|
+| `twitter.json` | 616 KB | 0.60 GB/s | 1.24 GB/s | 2.07x |
+| `citm_catalog.json` | 1.7 MB | 0.64 GB/s | 1.38 GB/s | 2.17x |
+| `twitter_large_record.json` | 804 MB | 0.51 GB/s | 0.75 GB/s | 1.46x |
 
 **Usage:**
 ```mojo

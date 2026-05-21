@@ -558,15 +558,19 @@ def _parse_object(
 # ---------------------------------------------------------------------------
 
 
-def parse_two_pass[force_scalar: Bool = True](input: String) raises -> Value:
+def parse_two_pass[force_scalar: Bool = False](input: String) raises -> Value:
     """End-to-end stage 1 + stage 2 parse.
 
     Parameters:
-        force_scalar: When True (default), use the scalar stage 1
-            oracle. When False, use the SIMD stage 1 implementation
-            (`stage1.parse_structural_simd`). Both produce identical
-            output (enforced by `tests/test_stage1_equivalence.mojo`);
-            this is purely a performance switch.
+        force_scalar: When False (default), use the SIMD stage 1
+            implementation (`stage1.parse_structural_simd`); on the
+            benchmark corpora SIMD is 1.5x to 2.2x faster than the
+            scalar walker. When True, use the scalar oracle -- useful
+            for differential testing and for inputs small enough that
+            the SIMD chunk loop never runs (n < 32). Both produce
+            identical output (enforced by
+            `tests/test_stage1_equivalence.mojo`); this is purely a
+            performance switch.
     """
     from .stage1_scalar import parse_structural_scalar
     from .stage1 import parse_structural_simd

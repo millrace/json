@@ -65,12 +65,11 @@ def _parse_cpu_simdjson(s: String) raises -> Value:
 
 
 def _parse_cpu_mojo(s: String) raises -> Value:
-    """Parse JSON using the v0.2 two-pass CPU parser (stage 1 + stage 2).
+    """Parse JSON using the two-pass CPU parser (stage 1 + stage 2).
 
-    The stage 1 default is the scalar oracle. To benchmark with the SIMD
-    stage 1 instead, callers can route through
-    `cpu.parse_cpu_native[force_scalar=False]` directly. See
-    `json/.cursor/rules/design-0.2.mdc` Phase C for the rationale.
+    The stage 1 default is SIMD (1.5x to 2.2x faster than the scalar
+    walker on the benchmark corpora). Differential testing routes
+    through `cpu.parse_cpu_native[force_scalar=True]`.
     """
     return parse_cpu_native(s)
 
