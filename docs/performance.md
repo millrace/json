@@ -133,9 +133,9 @@ json has three CPU code paths, all served by `loads(target='cpu')`:
 
 | Path | DOM model | What it costs |
 |---|---|---|
-| **simd** (default) | Lazy v0.1 `Value`: arrays/objects store the raw substring, children are decoded on access | Cheap to parse, expensive (and sometimes incorrect) on traversal -- see below |
-| **scalar** | Same lazy `Value` | Same trade-off, ~2x slower than simd because stage 1 is byte-by-byte |
-| **tape** (`-D JSON_USE_TAPE_VALUE=1`) | Eager `Document` tape: every primitive becomes a typed tape entry at parse time | Slower to parse, **dramatically** faster on traversal, and correct on real-world JSON |
+| **tape** (default in v0.2) | Eager `Document` tape: every primitive becomes a typed tape entry at parse time | Slower to parse-and-peek than the lazy paths; **dramatically** faster on traversal and correct on real-world JSON |
+| **simd lazy** (`-D JSON_USE_LAZY_VALUE=1`) | Legacy v0.1 `Value`: arrays/objects store the raw substring, children are decoded on access | Cheap to parse-and-peek, expensive (and sometimes incorrect) on traversal -- see below |
+| **scalar lazy** (`-D JSON_USE_LAZY_VALUE=1`, scalar stage 1) | Same lazy `Value`, scalar stage 1 | Same trade-off as simd lazy, ~2x slower because stage 1 is byte-by-byte |
 | simdjson (FFI) | C++ simdjson via the `target='cpu-simdjson'` shim | Reference parser at the cost of FFI marshalling |
 
 ### Two workloads, two answers
@@ -172,17 +172,19 @@ FFI shim because it sidesteps the marshalling round-trip. Under the
 traversal workload the lazy paths fall off a cliff and tape wins
 unambiguously.
 
-### Why tape exists (and why it's the future default)
+### Why tape is the v0.2 default
 
 The lazy v0.1 representation was fast for "parse and ignore", which is
-why it's still the entry-point default: existing code paths
-(jsonpath, schema, patch, reflection, simdjson FFI) light up
-unchanged. But its on-access re-parse model is the documented
-silent-bug source: nested mutations don't propagate, duplicate keys
-collapse, and traversal cost is super-linear. Every fix to those
-makes the lazy path slower without making it correct.
+why it shipped first and why it's still in tree behind
+`-D JSON_USE_LAZY_VALUE=1`. But its on-access re-parse model is the
+documented silent-bug source: nested mutations don't propagate
+through `Value` views, duplicate keys collapse, and traversal cost is
+super-linear because every `object_items()` rescans the raw
+substring. Every fix to those makes the lazy path slower without
+making it correct.
 
-The tape `Document` is the v0.2 design's answer:
+The tape `Document` is the v0.2 design's answer, and it's now the
+default behind `loads(target='cpu')`:
 
 * Each value gets exactly one tape entry. No re-parsing, no
   re-scanning, no key-collision lottery.
@@ -194,11 +196,11 @@ The tape `Document` is the v0.2 design's answer:
   copy-on-write mutation can correctly propagate through nested
   containers (Phase 2d).
 
-In other words: the bench's "tape is slow under peek" is paying for
-correctness and post-parse traversal speed. The plan is to make tape
-the default once we've audited the remaining callers; the
-`-D JSON_USE_TAPE_VALUE=1` flag is the staged rollout, not a sign
-that tape is optional.
+In other words: tape pays for correctness and post-parse traversal
+speed at parse time. That's the right trade for almost every real
+consumer. The legacy lazy path stays gated for now to unblock callers
+that haven't migrated, and will be removed entirely in a follow-up
+once the v0.1 `_raw` fields can come out of `Value`.
 
 ## When to Use GPU vs CPU
 

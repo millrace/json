@@ -140,10 +140,13 @@ The lazy paths still beat tape on `parse + peek` because they don't
 decode children -- they store array/object bodies as raw substrings
 and rescan on access. That makes them cheap when you ignore the
 parsed result and pathologically slow / incorrect when you don't.
-Tape (`-D JSON_USE_TAPE_VALUE=1`) is the v0.2 design's answer:
-typed tape entries, zero-copy strings, one DOM representation shared
-with the GPU pipeline, and correct nested mutation. It's the future
-default; the flag is the staged rollout.
+**As of v0.2, `loads(target='cpu')` routes through the tape path by
+default** -- typed tape entries, zero-copy strings, one DOM
+representation shared with the GPU pipeline, and correct nested
+mutation. The legacy lazy path is still in tree behind
+`-D JSON_USE_LAZY_VALUE=1` so callers that haven't migrated stay
+unblocked, but it's documented to be slower and to disagree with
+itself on documents like `citm_catalog`.
 
 ```bash
 # Download large dataset first (required for meaningful GPU benchmarks).

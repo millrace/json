@@ -88,10 +88,13 @@ duplicate keys or non-trivial escapes. Tape is the only path that
 walks `citm_catalog` correctly **and** it's 30-60x faster than the
 (buggy) lazy walk on the same input.
 
-Headline: under peek-only, pure-Mojo `simd` runs at ~50% of native
-simdjson with zero FFI; under realistic traversal, the only sensible
-choice is `tape` (the v0.2 design's answer to the lazy path's
-silent-bug surface).
+Headline: under peek-only, pure-Mojo `simd` (lazy) runs at ~50% of
+native simdjson with zero FFI; under realistic traversal, tape is
+both faster and the only correct option. **In v0.2,
+`loads(target='cpu')` routes through tape by default.** The legacy
+lazy path is gated behind `-D JSON_USE_LAZY_VALUE=1` for callers that
+haven't migrated and will be removed once the v0.1 `_raw` fields can
+come out of `Value`.
 
 ## Important: GPU Benchmarks Require Large Files
 

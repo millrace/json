@@ -65,20 +65,25 @@ def _parse_cpu_simdjson(s: String) raises -> Value:
 
 
 def _parse_cpu_mojo(s: String) raises -> Value:
-    """Parse JSON using the two-pass CPU parser (stage 1 + stage 2).
+    """Parse JSON using the two-pass CPU parser (stage 1 + stage 2)
+    into a tape-backed `Document`. The returned `Value` is a view over
+    that document.
 
     The stage 1 default is SIMD (1.5x to 2.2x faster than the scalar
     walker on the benchmark corpora). Differential testing routes
     through `cpu.parse_cpu_native[force_scalar=True]`.
 
-    Build with `-D JSON_USE_TAPE_VALUE=1` to route through the
-    tape-backed Value view (Phase 2c). The flag will become the
-    default once the test suite is fully green on the tape path.
+    Build with `-D JSON_USE_LAZY_VALUE=1` to fall back to the legacy
+    v0.1 lazy `Value` representation (raw substrings, on-access
+    rescan). That path is documented to be slower and to disagree
+    with itself on documents with duplicate keys / non-trivial
+    escapes; it exists only to unblock callers that haven't been
+    migrated to the tape view yet.
     """
-    comptime if is_defined["JSON_USE_TAPE_VALUE"]():
-        return parse_cpu_native_tape(s)
-    else:
+    comptime if is_defined["JSON_USE_LAZY_VALUE"]():
         return parse_cpu_native(s)
+    else:
+        return parse_cpu_native_tape(s)
 
 
 def _parse_cpu[backend: StaticString = "simdjson"](s: String) raises -> Value:
