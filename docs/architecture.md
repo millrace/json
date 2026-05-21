@@ -15,9 +15,9 @@ graph TB
         dumps["dumps(v)"]
     end
 
-    subgraph "CPU - default (parse_cpu_native)"
+    subgraph "CPU - default (parse_cpu_native_tape)"
         stage1["Stage 1: scalar | SIMD structural index"]
-        stage2["Stage 2: walk index, build Value"]
+        stage2["Stage 2: walk index, emit tape"]
     end
 
     subgraph "CPU - simdjson FFI (target='cpu-simdjson')"
@@ -64,10 +64,11 @@ bytes for structure.
   validation for trailing commas, double commas, leading zeros,
   missing colons, missing values, unquoted keys, invalid escapes,
   and trailing top-level content.
-- `json/cpu/__init__.parse_cpu_native[force_scalar=False|True]` --
-  the public CPU entry point. Default is SIMD (1.5x to 2.2x faster
-  than the scalar walker on the benchmark corpora); pass
-  `force_scalar=True` for differential testing.
+- `json/cpu/__init__.parse_cpu_native_tape[force_scalar=False|True]`
+  -- the public CPU entry point; emits a tape-backed `Value` view.
+  Default is SIMD (1.5x to 2.2x faster than the scalar walker on the
+  benchmark corpora); pass `force_scalar=True` for differential
+  testing.
 - `tests/test_stage1_equivalence.mojo` -- asserts stage 1 SIMD and
   scalar produce byte-identical position lists, including a
   full-document run against the benchmark corpora.

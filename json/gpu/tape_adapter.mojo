@@ -42,11 +42,14 @@
 # the merged index in O(structural_count).
 
 from std.collections import List
+from std.memory import ArcPointer
 
 from ..value import Value
+from ..value.value import make_view_value
+from ..document import Document
 from ..types import JSONResult
 from ..cpu.stage1_scalar import StructuralIndex, parse_structural_scalar
-from ..cpu.stage2 import parse_with_index
+from ..cpu.stage2 import parse_into_document
 
 
 # ---------------------------------------------------------------------------
@@ -54,22 +57,28 @@ from ..cpu.stage2 import parse_with_index
 # ---------------------------------------------------------------------------
 
 
-def parse_gpu_to_value(input: String, gpu_result: JSONResult) raises -> Value:
-    """Convert a GPU `JSONResult` into a `Value` via the v0.2 stage 2 walker.
+def parse_gpu_to_value(
+    var input: String, gpu_result: JSONResult
+) raises -> Value:
+    """Convert a GPU `JSONResult` into a tape-backed `Value` via stage 2.
 
     Args:
         input: Original JSON bytes (the same bytes handed to the GPU
-            kernel; the adapter does not re-decode them).
+            kernel; the adapter does not re-decode them). The returned
+            `Value`'s document owns these bytes.
         gpu_result: GPU output. Only `gpu_result.structural` is consumed
             here; `pair_pos` is computed but currently unused -- a future
             patch can pass it to stage 2 to skip the inner-bracket walk
             entirely.
 
     Returns:
-        Parsed `Value`.
+        Tape-backed `Value` view of the parsed document root.
     """
     var index = _result_to_index(input, gpu_result)
-    return parse_with_index(input, index^)
+    var doc = parse_into_document(input^, index^)
+    var root_idx = doc.root()
+    var arc = ArcPointer[Document](doc^)
+    return make_view_value(arc, root_idx)
 
 
 # ---------------------------------------------------------------------------

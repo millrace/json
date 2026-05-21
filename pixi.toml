@@ -82,17 +82,9 @@ build = "bash json/cpu/simdjson_ffi/build.sh"
 # running. The flag is harmless on Linux + NVIDIA / AMD because the
 # native GPU path is taken before the fallback gate.
 tests = "mojo -I . tests/test_value.mojo && mojo -I . tests/test_parser.mojo && mojo -I . tests/test_serialize.mojo && mojo -I . tests/test_serde.mojo && mojo -I . tests/test_reflection.mojo && mojo -I . tests/test_e2e.mojo && mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . tests/test_gpu.mojo && mojo -I . examples/basic/parsing.mojo && mojo -I . examples/basic/file_io.mojo && mojo -I . examples/basic/value_types.mojo && mojo -I . examples/basic/error_handling.mojo && mojo -I . examples/intermediate/reflection_serde.mojo && mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . examples/intermediate/struct_serde.mojo && mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . examples/intermediate/ndjson.mojo && mojo -I . examples/intermediate/jsonpath.mojo && mojo -I . examples/intermediate/schema_validation.mojo && mojo -I . examples/intermediate/json_patch.mojo && mojo -I . examples/advanced/lazy_parsing.mojo && mojo -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 -I . examples/advanced/gpu_parsing.mojo"
-# tests-cpu: full CPU suite. As of v0.2, loads(target='cpu') routes
-# through the tape-backed Value view by default, so this is also the
-# tape conformance suite. The legacy v0.1 lazy path is gated behind
-# `-D JSON_USE_LAZY_VALUE=1` and is documented to be slower and
-# correctness-buggy on documents with duplicate keys / non-trivial
-# escapes; it exists only to unblock callers that haven't migrated.
+# tests-cpu: full CPU suite. `loads(target='cpu')` routes through the
+# tape-backed Value view, so this is also the tape conformance suite.
 tests-cpu = "mojo -I . tests/test_value.mojo && mojo -I . tests/test_parser.mojo && mojo -I . tests/test_serialize.mojo && mojo -I . tests/test_serde.mojo && mojo -I . tests/test_reflection.mojo && mojo -I . tests/test_jsonpath.mojo && mojo -I . tests/test_patch.mojo && mojo -I . tests/test_schema.mojo && mojo -I . tests/test_value_mutation.mojo && mojo -I . tests/test_stage1_equivalence.mojo && mojo -I . tests/test_backend_equivalence.mojo && mojo -I . tests/test_document.mojo && mojo -I . tests/test_stage2_tape.mojo && mojo -I . examples/basic/parsing.mojo && mojo -I . examples/basic/file_io.mojo && mojo -I . examples/basic/value_types.mojo && mojo -I . examples/basic/error_handling.mojo && mojo -I . examples/advanced/lazy_parsing.mojo && mojo -I . examples/intermediate/jsonpath.mojo && mojo -I . examples/intermediate/schema_validation.mojo && mojo -I . examples/intermediate/json_patch.mojo && mojo -I . examples/intermediate/reflection_serde.mojo"
-# tests-cpu-lazy: rerun the CPU suite against the legacy v0.1 lazy
-# representation. Kept as a regression net while the lazy code is
-# still in tree; will be deleted once the v0.1 _raw path is removed.
-tests-cpu-lazy = "mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_value.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_parser.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_serialize.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_serde.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_reflection.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_jsonpath.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_patch.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_schema.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_value_mutation.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_stage1_equivalence.mojo && mojo -D JSON_USE_LAZY_VALUE=1 -I . tests/test_backend_equivalence.mojo"
 # tests-gpu: pin -D JSON_GPU_ALLOW_APPLE_FALLBACK=1 so the suite stays
 # runnable on Apple Silicon dev boxes (Mojo's Metal backend currently
 # lacks raw-pointer kernel support; the flag swaps loads[target='gpu']

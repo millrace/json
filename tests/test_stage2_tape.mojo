@@ -1,21 +1,16 @@
-# Tests for the tape-emitting stage 2 path (Phase 2a).
+# Tests for the tape-emitting stage 2 path.
 #
-# `parse_into_document(input, index)` is the v0.2 stage 2 alternative
-# to `parse_with_index(input, index)`: instead of building a `Value`
-# tree with `_raw` substrings, it emits a packed tape into a
-# `Document`. These tests verify three things:
+# `parse_into_document(input, index)` walks the structural index and
+# emits a packed tape into a `Document`. These tests verify two
+# things:
 #
 #   1. Document layout: the root entry is the last tape slot, child
 #      indices are contiguous and point backwards, and value
 #      materialisation through the `Document.get_*` accessors
 #      reproduces the original JSON value.
-#   2. Equivalence: for every fixture, the tape semantics match the
-#      v0.1 `Value` tree produced by `parse_with_index`. The
-#      comparison walks both representations recursively and asserts
-#      structural + scalar equality.
-#   3. Validation: every malformed-JSON error that `parse_with_index`
-#      raises must also be raised by `parse_into_document`. The tape
-#      path is not allowed to be more permissive.
+#   2. Validation: every malformed-JSON input the canonical
+#      `loads` rejects must also be rejected by `parse_into_document`
+#      directly. The tape path is not allowed to be more permissive.
 
 from std.testing import (
     assert_equal,
@@ -27,7 +22,7 @@ from std.testing import (
 from std.collections import List
 
 from json.cpu.stage1_scalar import parse_structural_scalar
-from json.cpu.stage2 import parse_with_index, parse_into_document
+from json.cpu.stage2 import parse_into_document
 from json.document import (
     Document,
     TAPE_TAG_NULL,
@@ -319,17 +314,16 @@ def test_equiv_string_with_structural_chars_inside() raises:
 
 
 # ---------------------------------------------------------------------------
-# Validation parity with parse_with_index
+# Validation parity with the canonical loads pipeline
 # ---------------------------------------------------------------------------
 
 
 def _both_paths_must_reject(s: String, label: String) raises:
-    """Both `parse_with_index` and `parse_into_document` must reject
-    the same malformed inputs."""
-    var idx1 = parse_structural_scalar(s)
+    """Both `loads` (canonical pipeline) and `parse_into_document`
+    must reject the same malformed inputs."""
     var v1_raised = False
     try:
-        var _v = parse_with_index(s, idx1)
+        var _v = loads(s)
     except:
         v1_raised = True
     assert_true(v1_raised, "Reference path accepted bad input: " + label)

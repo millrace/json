@@ -5,19 +5,13 @@ from std.collections import List
 from std.memory import memcpy, ArcPointer
 from std.sys import has_apple_gpu_accelerator, is_defined
 
-from .value import (
-    Value,
-    Null,
-    make_array_value,
-    make_object_value,
-    make_view_value,
-)
+from .value import Value, Null, make_view_value
 from .serialize import dumps
 from .cpu import SimdjsonFFI, SIMDJSON_TYPE_NULL, SIMDJSON_TYPE_BOOL
 from .cpu import SIMDJSON_TYPE_INT64, SIMDJSON_TYPE_UINT64
 from .cpu import SIMDJSON_TYPE_DOUBLE, SIMDJSON_TYPE_STRING
 from .cpu import SIMDJSON_TYPE_ARRAY, SIMDJSON_TYPE_OBJECT
-from .cpu import parse_cpu_native, parse_cpu_native_tape
+from .cpu import parse_cpu_native_tape
 from .document import (
     Document,
     pack_tape_entry,
@@ -161,19 +155,9 @@ def _parse_cpu_mojo(s: String) raises -> Value:
 
     The stage 1 default is SIMD (1.5x to 2.2x faster than the scalar
     walker on the benchmark corpora). Differential testing routes
-    through `cpu.parse_cpu_native[force_scalar=True]`.
-
-    Build with `-D JSON_USE_LAZY_VALUE=1` to fall back to the legacy
-    v0.1 lazy `Value` representation (raw substrings, on-access
-    rescan). That path is documented to be slower and to disagree
-    with itself on documents with duplicate keys / non-trivial
-    escapes; it exists only to unblock callers that haven't been
-    migrated to the tape view yet.
+    through `cpu.parse_cpu_native_tape[force_scalar=True]`.
     """
-    comptime if is_defined["JSON_USE_LAZY_VALUE"]():
-        return parse_cpu_native(s)
-    else:
-        return parse_cpu_native_tape(s)
+    return parse_cpu_native_tape(s)
 
 
 def _parse_cpu[backend: StaticString = "simdjson"](s: String) raises -> Value:
@@ -519,11 +503,16 @@ def load[target: StaticString = "cpu"](path: String) raises -> Value:
     return loads[target](content)
 
 
-def _list_to_array_value(values: List[Value]) -> Value:
-    """Convert List[Value] to a Value containing an array."""
+def _list_to_array_value(values: List[Value]) raises -> Value:
+    """Convert `List[Value]` to a tape-backed array `Value`.
+
+    Serializes each element to JSON and re-parses the joined `[ ... ]`
+    payload through the canonical CPU pipeline so the result is a
+    standard tape-backed view (no v0.1 raw-substring representation).
+    """
     var count = len(values)
     if count == 0:
-        return make_array_value("[]", 0)
+        return loads("[]")
 
     var raw = String("[")
     for i in range(count):
@@ -531,7 +520,7 @@ def _list_to_array_value(values: List[Value]) -> Value:
             raw += ","
         raw += dumps(values[i])
     raw += "]"
-    return make_array_value(raw, count)
+    return loads(raw)
 
 
 def load[

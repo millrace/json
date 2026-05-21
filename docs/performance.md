@@ -129,62 +129,56 @@ GPU parallelism shines with large files where the overhead is amortized.
 
 ## CPU Performance
 
-json has three CPU code paths, all served by `loads(target='cpu')`:
+json has two CPU code paths, both served by `loads(target='cpu')`:
 
 | Path | DOM model | What it costs |
 |---|---|---|
-| **tape** (default in v0.2) | Eager `Document` tape: every primitive becomes a typed tape entry at parse time | Slower to parse-and-peek than the lazy paths; **dramatically** faster on traversal and correct on real-world JSON |
-| **simd lazy** (`-D JSON_USE_LAZY_VALUE=1`) | Legacy v0.1 `Value`: arrays/objects store the raw substring, children are decoded on access | Cheap to parse-and-peek, expensive (and sometimes incorrect) on traversal -- see below |
-| **scalar lazy** (`-D JSON_USE_LAZY_VALUE=1`, scalar stage 1) | Same lazy `Value`, scalar stage 1 | Same trade-off as simd lazy, ~2x slower because stage 1 is byte-by-byte |
-| simdjson (FFI) | C++ simdjson via the `target='cpu-simdjson'` shim | Reference parser at the cost of FFI marshalling |
+| **tape** (default) | Eager `Document` tape: every primitive becomes a typed tape entry at parse time. SIMD stage 1 by default; opt into the scalar oracle with `parse_cpu_native_tape[force_scalar=True]` | A bit slower to parse than the legacy lazy approach we shipped historically; dramatically faster and correct on traversal of real-world JSON |
+| simdjson (FFI) | C++ simdjson via the `target='cpu-simdjson'` shim. The FFI output is translated into the same tape representation | Reference parser at the cost of FFI marshalling |
 
 ### Two workloads, two answers
 
 `pixi run -e dev bench-cpu <file>` reports both:
 
-* `scalar` / `simd` / `tape` -- "parse, then peek the root with
-  `is_object()`". Children are not touched, so the lazy paths get to
-  short-circuit.
-* `scalar_traverse` / `simd_traverse` / `tape_traverse` -- "parse, then
-  recursively visit every value via the public API
+* `scalar` / `simd` -- "parse, then peek the root with
+  `is_object()`". Children are not touched, so this measures
+  the parse cost in isolation.
+* `scalar_traverse` / `simd_traverse` -- "parse, then recursively
+  visit every value via the public API
   (`array_items` / `object_items` / `*_value`)". This is what almost
   any real consumer ends up doing.
 
-#### Numbers (Apple Silicon, M-series, this dev box)
+#### Historical comparison (Apple Silicon, M-series, this dev box)
 
-| Corpus | Size | simdjson C++ | simd (peek) | tape (peek) | simd_traverse | **tape_traverse** |
+The numbers below were collected while the legacy v0.1 lazy `Value`
+representation still shipped as a `-D JSON_USE_LAZY_VALUE=1`
+fallback. They are kept here as evidence for why the tape path is
+the only path the library now ships:
+
+| Corpus | Size | simdjson C++ | simd lazy (peek) | tape (peek) | simd lazy (traverse) | **tape (traverse)** |
 |---|---|---|---|---|---|---|
 | `twitter.json` | 617 KB | 2.66 GB/s | 1.18 GB/s | 0.23 GB/s | 142.9 ms | **4.17 ms (34x faster)** |
 | `citm_catalog.json` | 1.7 MB | 3.13 GB/s | 1.33 GB/s | 0.23 GB/s | **701 ms ❌ buggy** | **11.38 ms ✅ correct (62x faster)** |
 | `twitter_large_record.json` | 804 MB | 1.47 GB/s | 0.73 GB/s | 0.15 GB/s | (not run; quadratic-ish) | (eager parse only -- bench measures `peek`) |
 
-The `citm_catalog` row is the punchline: the lazy path raises
-`Key not found in JSON object` mid-walk because `object_items()`
-re-scans the raw substring for each key it remembered, and that
-second scan can disagree with the first on documents with duplicate
-keys or non-trivial escape patterns. **The tape path is the only one
-that walks `citm_catalog` correctly**, and it does so 62x faster than
-the (buggy) lazy walk on the same input.
+The `citm_catalog` row was the punchline: the legacy lazy path
+raised `Key not found in JSON object` mid-walk because
+`object_items()` re-scanned the raw substring for each key it
+remembered, and that second scan could disagree with the first on
+documents with duplicate keys or non-trivial escape patterns. **The
+tape path is the only one that walks `citm_catalog` correctly**, and
+it does so 62x faster than the (buggy) lazy walk on the same input.
 
-Under the peek-only workload the lazy SIMD path lands at **~40-50 %
-of native simdjson** in pure Mojo with zero FFI, and ~2x the simdjson
-FFI shim because it sidesteps the marshalling round-trip. Under the
-traversal workload the lazy paths fall off a cliff and tape wins
-unambiguously.
+### Why tape is the only CPU path
 
-### Why tape is the v0.2 default
-
-The lazy v0.1 representation was fast for "parse and ignore", which is
-why it shipped first and why it's still in tree behind
-`-D JSON_USE_LAZY_VALUE=1`. But its on-access re-parse model is the
-documented silent-bug source: nested mutations don't propagate
-through `Value` views, duplicate keys collapse, and traversal cost is
-super-linear because every `object_items()` rescans the raw
-substring. Every fix to those makes the lazy path slower without
-making it correct.
-
-The tape `Document` is the v0.2 design's answer, and it's now the
-default behind `loads(target='cpu')`:
+The lazy v0.1 representation was fast for "parse and ignore", which
+is why it shipped first. But its on-access re-parse model was a
+documented silent-bug source: nested mutations didn't propagate
+through `Value` views, duplicate keys collapsed, and traversal cost
+was super-linear because every `object_items()` rescanned the raw
+substring. Every fix to those made the lazy path slower without
+making it correct, so the lazy `Value` representation was removed
+in favor of the tape:
 
 * Each value gets exactly one tape entry. No re-parsing, no
   re-scanning, no key-collision lottery.

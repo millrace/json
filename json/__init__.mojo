@@ -24,8 +24,8 @@ v0.2 changes worth knowing:
 - `Value` is a view over a tape-backed `Document`; mutation is
   copy-on-write, so nested `set` / `append` propagates correctly.
 - The default CPU parser is the two-pass stage 1 + stage 2 walker
-  (`json.cpu.parse_cpu_native`); `parse_mojo` / `parse_simd` and the
-  `MojoJSONParser` / `FastParser` types are gone.
+  (`json.cpu.parse_cpu_native_tape`); `parse_mojo` / `parse_simd` and
+  the `MojoJSONParser` / `FastParser` types are gone.
 - `loads[target='gpu']` on Apple Silicon raises by default; recompile
   with `-D JSON_GPU_ALLOW_APPLE_FALLBACK=1` to keep the v0.1 silent
   CPU fallback.
@@ -40,7 +40,7 @@ from .serialize import dumps, dump
 from .config import ParserConfig, SerializerConfig
 
 # Value type.
-from .value import Value, Null, make_array_value, make_object_value
+from .value import Value, Null
 
 # Manual ser/de traits.
 from .serialize import to_json_value, to_json_string, Serializable, serialize

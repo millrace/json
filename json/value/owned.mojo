@@ -21,9 +21,11 @@ from std.collections import List
 from std.collections.dict import Dict
 from std.memory import ArcPointer
 
-from .value import Value, Null
+from .value import Value, Null, make_view_value
 from ..document import (
     Document,
+    pack_tape_entry,
+    pack_pair,
     TAPE_TAG_NULL,
     TAPE_TAG_BOOL,
     TAPE_TAG_INT,
@@ -32,6 +34,7 @@ from ..document import (
     TAPE_TAG_STRING_OWNED,
     TAPE_TAG_ARRAY,
     TAPE_TAG_OBJECT,
+    TAPE_TAG_KEY,
 )
 from ..unicode import unescape_json_string, unescape_json_string_span
 
@@ -217,10 +220,10 @@ def _view_to_owned(
 def _parse_owned_value(json_str: String) raises -> OwnedValue:
     """Parse a raw JSON value string into an `OwnedValue` tree.
 
-    This is a small recursive-descent walker that mirrors the parser
-    in `value.value._parse_json_value_to_value` but emits an
-    `OwnedValue` directly instead of a `Value` whose array/object body
-    is stored as a raw substring.
+    Small recursive-descent walker used by mutation paths that
+    receive a value as raw JSON. Emits an `OwnedValue` directly,
+    matching the shape later turned into a tape-backed `Value` by
+    `_serialize_into_value`.
     """
     var bytes = json_str.as_bytes()
     var n = len(bytes)
@@ -560,38 +563,86 @@ def _materialize_for_write(v: Value) raises -> OwnedValue:
 
 
 def _serialize_into_value(o: OwnedValue) -> Value:
-    """Serialize an `OwnedValue` and produce a fresh `Value`.
+    """Serialize an `OwnedValue` into a tape-backed `Value` view.
 
-    For arrays and objects, the returned Value has `_raw` set to the
-    serialized JSON, plus its `_keys` / `_count` populated so the
-    v0.1 read path keeps working.
+    Builds a fresh `Document` from the OwnedValue tree (no JSON
+    string round-trip, no parsing) and returns a view over it. The
+    layout matches what the v0.2 CPU and FFI parsers emit, so callers
+    don't need to care which source produced the value.
+
+    Used by `Value.set` / `Value.append` / `Value.set_at` to fold
+    mutations back into a `Value`.
     """
+    var doc = _owned_to_tape(o)
+    var root_idx = doc.root()
+    var arc = ArcPointer[Document](doc^)
+    return make_view_value(arc, root_idx)
+
+
+def _owned_to_tape(o: OwnedValue) -> Document:
+    """Build a `Document` whose root entry represents `o`.
+
+    Mirror of the producer protocol used by `_emit_simdjson_value`
+    (parser.mojo) and `_emit_value_to_doc` (cpu/stage2.mojo): for
+    containers we emit children's headers into a contiguous run
+    before writing the parent header, and the root header is
+    appended last so `Document.root()` returns its index.
+    """
+    var doc = Document()
+    var root_header = _emit_owned_to_doc(doc, o)
+    doc.tape.append(root_header)
+    return doc^
+
+
+def _emit_owned_to_doc(mut doc: Document, o: OwnedValue) -> UInt64:
+    """Translate one `OwnedValue` into its tape header. Descendants
+    are flushed into `doc.tape` as a side effect; the returned header
+    is NOT appended (the caller does that).
+    """
+    var payload_mask = (UInt64(1) << 60) - 1
     if o.kind == 0:
-        return Value(Null())
+        return pack_tape_entry(TAPE_TAG_NULL, 0)
     if o.kind == 1:
-        return Value(o.bool_val)
+        var b: UInt64 = 1 if o.bool_val else 0
+        return pack_tape_entry(TAPE_TAG_BOOL, b)
     if o.kind == 2:
-        return Value(o.int_val)
+        return pack_tape_entry(TAPE_TAG_INT, UInt64(o.int_val) & payload_mask)
     if o.kind == 3:
-        return Value(o.float_val)
+        var pool_idx = len(doc.float_pool)
+        doc.float_pool.append(o.float_val)
+        return pack_tape_entry(TAPE_TAG_FLOAT, UInt64(pool_idx))
     if o.kind == 4:
-        return Value(o.str_val)
+        var pool_idx = len(doc.string_pool)
+        doc.string_pool.append(o.str_val.copy())
+        return pack_tape_entry(TAPE_TAG_STRING_OWNED, UInt64(pool_idx))
     if o.kind == 5:
-        var raw = _owned_to_json(o)
-        var v = Value(Null())
-        v._type = 5
-        v._raw = raw
-        v._count = len(o.array_val)
-        return v^
+        var count = len(o.array_val)
+        var headers = List[UInt64](capacity=count)
+        for i in range(count):
+            headers.append(_emit_owned_to_doc(doc, o.array_val[i]))
+        var child_start = len(doc.tape)
+        for j in range(len(headers)):
+            doc.tape.append(headers[j])
+        return pack_tape_entry(
+            TAPE_TAG_ARRAY,
+            pack_pair(UInt64(count), UInt64(child_start)),
+        )
     if o.kind == 6:
-        var raw = _owned_to_json(o)
-        var v = Value(Null())
-        v._type = 6
-        v._raw = raw
-        v._count = len(o.object_keys)
-        v._keys = o.object_keys.copy()
-        return v^
-    return Value(Null())
+        var pair_count = len(o.object_keys)
+        var headers = List[UInt64](capacity=2 * pair_count)
+        for i in range(pair_count):
+            var key_pool_idx = len(doc.key_pool)
+            doc.key_pool.append(o.object_keys[i].copy())
+            headers.append(pack_tape_entry(TAPE_TAG_KEY, UInt64(key_pool_idx)))
+            headers.append(_emit_owned_to_doc(doc, o.object_values[i]))
+        var child_start = len(doc.tape)
+        for j in range(len(headers)):
+            doc.tape.append(headers[j])
+        return pack_tape_entry(
+            TAPE_TAG_OBJECT,
+            pack_pair(UInt64(pair_count), UInt64(child_start)),
+        )
+    return pack_tape_entry(TAPE_TAG_NULL, 0)
 
 
 # ---------------------------------------------------------------------------

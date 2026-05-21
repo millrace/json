@@ -28,7 +28,6 @@ from std.benchmark import (
 )
 from std.pathlib import Path
 from std.sys import argv
-from json.cpu.stage2 import parse_two_pass
 from json.cpu import parse_cpu_native_tape
 from json.value import Value
 
@@ -164,7 +163,8 @@ def main() raises:
         @parameter
         @always_inline
         def call_fn() raises:
-            var v = parse_two_pass[force_scalar=True](json_str)
+            # Scalar stage 1 + tape-emitting stage 2.
+            var v = parse_cpu_native_tape[force_scalar=True](json_str.copy())
             _ = v.is_object()
 
         b.iter[call_fn]()
@@ -175,19 +175,7 @@ def main() raises:
         @parameter
         @always_inline
         def call_fn() raises:
-            var v = parse_two_pass[force_scalar=False](json_str)
-            _ = v.is_object()
-
-        b.iter[call_fn]()
-
-    @parameter
-    @always_inline
-    def bench_tape(mut b: Bencher) raises capturing:
-        @parameter
-        @always_inline
-        def call_fn() raises:
-            # Tape-backed Value view (Phase 2 + 3): SIMD stage 1 +
-            # tape-emitting stage 2 + zero-copy clean strings.
+            # SIMD stage 1 + tape-emitting stage 2 (default).
             var v = parse_cpu_native_tape(json_str.copy())
             _ = v.is_object()
 
@@ -199,7 +187,7 @@ def main() raises:
         @parameter
         @always_inline
         def call_fn() raises:
-            var v = parse_two_pass[force_scalar=True](json_str)
+            var v = parse_cpu_native_tape[force_scalar=True](json_str.copy())
             _ = _walk(v)
 
         b.iter[call_fn]()
@@ -210,17 +198,6 @@ def main() raises:
         @parameter
         @always_inline
         def call_fn() raises:
-            var v = parse_two_pass[force_scalar=False](json_str)
-            _ = _walk(v)
-
-        b.iter[call_fn]()
-
-    @parameter
-    @always_inline
-    def bench_tape_traverse(mut b: Bencher) raises capturing:
-        @parameter
-        @always_inline
-        def call_fn() raises:
             var v = parse_cpu_native_tape(json_str.copy())
             _ = _walk(v)
 
@@ -228,39 +205,29 @@ def main() raises:
 
     # `_walk` swallows access errors so we can still time the
     # traversal even when a backend has a correctness bug under deep
-    # recursion. As a separate signal print whether each path makes it
-    # through `citm_catalog`-style payloads cleanly, so the bench
-    # reader can correlate raw throughput with correctness. We only
-    # check this once at startup; the bench loop itself uses the
+    # recursion. As a separate signal print whether the simd path
+    # makes it through `citm_catalog`-style payloads cleanly, so the
+    # bench reader can correlate raw throughput with correctness. We
+    # only check this once at startup; the bench loop itself uses the
     # error-swallowing walk.
-    var diag_simd_v = parse_two_pass[force_scalar=False](json_str)
-    var diag_simd_ok = _walk_strict(diag_simd_v)
-    var diag_tape_v = parse_cpu_native_tape(json_str.copy())
-    var diag_tape_ok = _walk_strict(diag_tape_v)
+    var diag_v = parse_cpu_native_tape(json_str.copy())
+    var diag_ok = _walk_strict(diag_v)
     print("traversal correctness:")
-    if diag_simd_ok:
-        print("  simd / scalar (lazy): OK")
+    if diag_ok:
+        print("  tape (simd):  OK")
     else:
-        print("  simd / scalar (lazy): FAILED -- access error during walk")
-    if diag_tape_ok:
-        print("  tape (eager):         OK")
-    else:
-        print("  tape (eager):         FAILED -- access error during walk")
+        print("  tape (simd):  FAILED -- access error during walk")
     print()
 
     var measures = List[ThroughputMeasure]()
     measures.append(ThroughputMeasure(BenchMetric.bytes, file_size))
     bench.bench_function[bench_scalar](BenchId("json_cpu", "scalar"), measures)
     bench.bench_function[bench_simd](BenchId("json_cpu", "simd"), measures)
-    bench.bench_function[bench_tape](BenchId("json_cpu", "tape"), measures)
     bench.bench_function[bench_scalar_traverse](
         BenchId("json_cpu", "scalar_traverse"), measures
     )
     bench.bench_function[bench_simd_traverse](
         BenchId("json_cpu", "simd_traverse"), measures
-    )
-    bench.bench_function[bench_tape_traverse](
-        BenchId("json_cpu", "tape_traverse"), measures
     )
 
     print(bench)

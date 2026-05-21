@@ -2,7 +2,7 @@
 #
 # Demonstrates: Value type checking and value extraction
 
-from json import loads, dumps, Value, Null, make_array_value, make_object_value
+from json import loads, dumps, Value, Null
 from std.collections import List
 
 

@@ -1,19 +1,22 @@
 # json CPU backends.
 #
-# v0.2 ships two CPU paths:
-#   - `parse_cpu_native` (default): two-pass stage 1 + stage 2 walker.
-#       Stage 1 has scalar (`stage1_scalar`) and SIMD (`stage1`)
-#       implementations; both are byte-identical, enforced by
-#       `tests/test_stage1_equivalence.mojo`. Default is SIMD (1.5x
-#       to 2.2x faster on the benchmark corpora); opt into the scalar
-#       oracle with `parse_cpu_native[force_scalar=True]`.
+# v0.2 ships two CPU paths, both producing tape-backed `Value` views:
+#   - `parse_cpu_native_tape` (default): two-pass stage 1 + stage 2
+#       walker that emits a `Document` and wraps the root as a `Value`
+#       view. Stage 1 has scalar (`stage1_scalar`) and SIMD
+#       (`stage1`) implementations; both are byte-identical, enforced
+#       by `tests/test_stage1_equivalence.mojo`. Default is SIMD
+#       (1.5x to 2.2x faster on the benchmark corpora); opt into the
+#       scalar oracle with `parse_cpu_native_tape[force_scalar=True]`.
 #   - simdjson FFI: optional C++ backend, exposed via `SimdjsonFFI`
-#       and selected with `loads[target='cpu-simdjson']`.
+#       and selected with `loads[target='cpu-simdjson']`. The FFI
+#       output is translated into the same tape representation.
 #
 # The pre-v0.2 `parse_mojo` / `parse_simd` entry points (and their
-# `MojoJSONParser` / `FastParser` structs) were deleted in v0.2-E:
-# the codepaths they wrapped were dead since v0.2-A wired the
-# canonical CPU pipeline through `parse_cpu_native`.
+# `MojoJSONParser` / `FastParser` structs) were deleted in v0.2-E.
+# The v0.1 lazy `parse_cpu_native` / `parse_two_pass` entry points
+# were deleted alongside the lazy `Value` representation; everything
+# that used to consume them has been migrated to the tape view.
 
 # Common type tags shared with the simdjson FFI bindings.
 from .types import (
@@ -59,37 +62,20 @@ from .stage1_scalar import (
     StructuralIndex,
 )
 from .stage1 import parse_structural_simd
-from .stage2 import parse_with_index, parse_two_pass, parse_two_pass_tape
-
-
-def parse_cpu_native[force_scalar: Bool = False](s: String) raises -> Value:
-    """Two-pass CPU parser.
-
-    Parameters:
-        force_scalar: When False (default), use the SIMD stage 1
-            implementation; on the benchmark corpora SIMD is 1.5x
-            to 2.2x faster than the scalar walker. Set to True to
-            force the scalar oracle (useful for differential testing).
-
-    Args:
-        s: JSON input string.
-
-    Returns:
-        Parsed Value.
-    """
-    return parse_two_pass[force_scalar=force_scalar](s)
+from .stage2 import parse_two_pass_tape
 
 
 def parse_cpu_native_tape[
     force_scalar: Bool = False
 ](var s: String) raises -> Value:
-    """Two-pass CPU parser that returns a tape-backed Value view.
+    """Two-pass CPU parser that returns a tape-backed `Value` view.
 
-    Same parsing pipeline as `parse_cpu_native`, but the output value
-    is a view into a freshly built `Document`. Reads (`is_*`,
-    `*_value`, `array_count`, `__getitem__`, etc.) hit the tape
-    directly; mutations materialise back into the legacy
-    representation transparently.
+    Stage 1 finds structural positions (SIMD by default; scalar with
+    `force_scalar=True`); stage 2 walks the resulting index and emits
+    a `Document` whose root is wrapped as a `Value` view. Reads
+    (`is_*`, `*_value`, `array_count`, `__getitem__`, etc.) hit the
+    tape directly; mutations materialise into a temporary owned tree
+    and rebuild the document transparently.
 
     Parameters:
         force_scalar: SIMD vs scalar stage 1 (default SIMD).

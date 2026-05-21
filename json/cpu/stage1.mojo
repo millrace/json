@@ -34,9 +34,10 @@
 #   citm_catalog.json (1.7 MB) : scalar 0.64 GB/s, SIMD 1.38 GB/s (2.17x)
 #   twitter_large_record.json (804 MB) : scalar 0.51 GB/s, SIMD 0.75 GB/s (1.46x)
 #
-# `parse_two_pass` therefore defaults to SIMD; the scalar oracle stays
-# in `stage1_scalar.mojo` for differential testing and for inputs
-# smaller than one SIMD chunk where the chunk loop never runs.
+# `parse_cpu_native_tape` therefore defaults to SIMD; the scalar
+# oracle stays in `stage1_scalar.mojo` for differential testing and
+# for inputs smaller than one SIMD chunk where the chunk loop never
+# runs.
 
 from std.collections import List
 from std.bit import count_trailing_zeros
@@ -70,7 +71,8 @@ def parse_structural_simd(input: String) -> StructuralIndex:
     full-document run against the benchmark corpora.
 
     Faster than the scalar walker by 1.5x to 2.2x on the benchmark
-    corpora; this is the default stage 1 used by `parse_two_pass`.
+    corpora; this is the default stage 1 used by
+    `parse_cpu_native_tape`.
     """
     var bytes = input.as_bytes()
     var n = len(bytes)

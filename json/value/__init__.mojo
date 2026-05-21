@@ -13,12 +13,8 @@
 from .value import (
     Value,
     Null,
-    make_array_value,
-    make_object_value,
     make_view_value,
     _value_to_json,
-    _parse_json_value_to_value,
-    _navigate_pointer,
 )
 from .raw_ops import (
     _extract_field_value,

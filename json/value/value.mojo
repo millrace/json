@@ -1,30 +1,22 @@
 # json - Core Value type.
 #
-# `Value` is the public JSON value type. In v0.1 it stored arrays and
-# objects as raw JSON substrings and re-parsed them on every access --
-# a design the v0.2 redesign is incrementally walking back. Phase A
-# moves the type and its helpers into the `value/` package and adds
-# the `Document`/`Tape` storage that Phase B (copy-on-write) and
-# Phase C (tape-backed reads) will depend on, while keeping every
-# v0.1 method signature so callers (patch, jsonpath, schema,
-# serialize, reflection) build unchanged.
+# `Value` is the public JSON value type. As of v0.2, every `Value` is a
+# tape-backed view over a `Document` -- the v0.1 lazy / raw-substring
+# representation is no longer produced. The `_is_view` field and the
+# legacy fields (`_type`, `_raw`, `_keys`, ...) are scheduled for
+# removal in the dual-representation cleanup; until then read accessors
+# guard reads with `if self._is_view:` for safety, but every code path
+# that reaches `Value` now produces a view.
 #
 # Helpers split:
-#   - Pure string operations live in `raw_ops.mojo` (no Value dep).
-#   - Value-dependent helpers (`_value_to_json`,
-#     `_parse_json_value_to_value`, `_navigate_pointer`) live here so
-#     the import graph stays acyclic.
+#   - Pure string operations (used by `LazyValue`) live in `raw_ops.mojo`.
+#   - Value-dependent helpers (`_value_to_json`, etc.) live here so the
+#     import graph stays acyclic.
 
 from std.collections import List
 from std.memory import ArcPointer
 
-from .raw_ops import (
-    _extract_field_value,
-    _extract_array_element,
-    _count_array_elements,
-    _extract_object_keys,
-    _parse_json_pointer,
-)
+from .raw_ops import _parse_json_pointer
 from .owned import (
     OwnedValue,
     _materialize_for_write,
@@ -44,7 +36,6 @@ from ..document import (
     TAPE_TAG_OBJECT,
     TAPE_TAG_KEY,
 )
-from ..unicode import unescape_json_string, unescape_json_string_span
 
 
 struct Null(Writable):
@@ -363,26 +354,14 @@ struct Value(Copyable, Movable, Writable):
         if not self.is_object():
             raise Error("get() can only be called on JSON objects")
 
-        if self._is_view:
-            ref doc = self._doc[]
-            var pair_count = doc.get_count(self._tape_idx)
-            var child_start = doc.get_child_start(self._tape_idx)
-            for i in range(pair_count):
-                if doc.get_key(child_start + 2 * i) == key:
-                    var v = _make_view_child(self._doc, child_start + 2 * i + 1)
-                    return _view_to_json(v)
-            raise Error("Key '" + key + "' not found in JSON object")
-
-        var found = False
-        for i in range(len(self._keys)):
-            if self._keys[i] == key:
-                found = True
-                break
-
-        if not found:
-            raise Error("Key '" + key + "' not found in JSON object")
-
-        return _extract_field_value(self._raw, key)
+        ref doc = self._doc[]
+        var pair_count = doc.get_count(self._tape_idx)
+        var child_start = doc.get_child_start(self._tape_idx)
+        for i in range(pair_count):
+            if doc.get_key(child_start + 2 * i) == key:
+                var v = _make_view_child(self._doc, child_start + 2 * i + 1)
+                return _view_to_json(v)
+        raise Error("Key '" + key + "' not found in JSON object")
 
     def array_items(self) raises -> List[Value]:
         """Get all items in a JSON array as a list of Values.
@@ -401,26 +380,12 @@ struct Value(Copyable, Movable, Writable):
         if not self.is_array():
             raise Error("array_items() can only be called on JSON arrays")
 
-        if self._is_view:
-            ref doc = self._doc[]
-            var count = doc.get_count(self._tape_idx)
-            var child_start = doc.get_child_start(self._tape_idx)
-            var result = List[Value](capacity=count)
-            for i in range(count):
-                result.append(_make_view_child(self._doc, child_start + i))
-            return result^
-
-        var result = List[Value]()
-        var raw = self._raw
-
-        if self._count == 0:
-            return result^
-
-        for i in range(self._count):
-            var elem_str = _extract_array_element(raw, i)
-            var elem = _parse_json_value_to_value(elem_str)
-            result.append(elem^)
-
+        ref doc = self._doc[]
+        var count = doc.get_count(self._tape_idx)
+        var child_start = doc.get_child_start(self._tape_idx)
+        var result = List[Value](capacity=count)
+        for i in range(count):
+            result.append(_make_view_child(self._doc, child_start + i))
         return result^
 
     def object_items(self) raises -> List[Tuple[String, Value]]:
@@ -442,26 +407,14 @@ struct Value(Copyable, Movable, Writable):
         if not self.is_object():
             raise Error("object_items() can only be called on JSON objects")
 
-        if self._is_view:
-            ref doc = self._doc[]
-            var pair_count = doc.get_count(self._tape_idx)
-            var child_start = doc.get_child_start(self._tape_idx)
-            var result = List[Tuple[String, Value]](capacity=pair_count)
-            for i in range(pair_count):
-                var k = doc.get_key(child_start + 2 * i)
-                var v = _make_view_child(self._doc, child_start + 2 * i + 1)
-                result.append((k, v^))
-            return result^
-
-        var result = List[Tuple[String, Value]]()
-        var raw = self._raw
-
-        for i in range(len(self._keys)):
-            var key = self._keys[i]
-            var value_str = _extract_field_value(raw, key)
-            var value = _parse_json_value_to_value(value_str)
-            result.append((key, value^))
-
+        ref doc = self._doc[]
+        var pair_count = doc.get_count(self._tape_idx)
+        var child_start = doc.get_child_start(self._tape_idx)
+        var result = List[Tuple[String, Value]](capacity=pair_count)
+        for i in range(pair_count):
+            var k = doc.get_key(child_start + 2 * i)
+            var v = _make_view_child(self._doc, child_start + 2 * i + 1)
+            result.append((k, v^))
         return result^
 
     def __getitem__(self, index: Int) raises -> Value:
@@ -480,17 +433,11 @@ struct Value(Copyable, Movable, Writable):
         if not self.is_array():
             raise Error("Index access requires a JSON array")
 
-        if self._is_view:
-            var count = self._doc[].get_count(self._tape_idx)
-            if index < 0 or index >= count:
-                raise Error("Array index out of bounds: " + String(index))
-            var child_start = self._doc[].get_child_start(self._tape_idx)
-            return _make_view_child(self._doc, child_start + index)
-
-        if index < 0 or index >= self._count:
+        var count = self._doc[].get_count(self._tape_idx)
+        if index < 0 or index >= count:
             raise Error("Array index out of bounds: " + String(index))
-        var elem_str = _extract_array_element(self._raw, index)
-        return _parse_json_value_to_value(elem_str)
+        var child_start = self._doc[].get_child_start(self._tape_idx)
+        return _make_view_child(self._doc, child_start + index)
 
     def __getitem__(self, key: String) raises -> Value:
         """Get object value by key.
@@ -508,26 +455,13 @@ struct Value(Copyable, Movable, Writable):
         if not self.is_object():
             raise Error("Key access requires a JSON object")
 
-        if self._is_view:
-            ref doc = self._doc[]
-            var pair_count = doc.get_count(self._tape_idx)
-            var child_start = doc.get_child_start(self._tape_idx)
-            for i in range(pair_count):
-                if doc.get_key(child_start + 2 * i) == key:
-                    return _make_view_child(self._doc, child_start + 2 * i + 1)
-            raise Error("Key not found: " + key)
-
-        var found = False
-        for i in range(len(self._keys)):
-            if self._keys[i] == key:
-                found = True
-                break
-
-        if not found:
-            raise Error("Key not found: " + key)
-
-        var value_str = _extract_field_value(self._raw, key)
-        return _parse_json_value_to_value(value_str)
+        ref doc = self._doc[]
+        var pair_count = doc.get_count(self._tape_idx)
+        var child_start = doc.get_child_start(self._tape_idx)
+        for i in range(pair_count):
+            if doc.get_key(child_start + 2 * i) == key:
+                return _make_view_child(self._doc, child_start + 2 * i + 1)
+        raise Error("Key not found: " + key)
 
     def set(mut self, key: String, value: Value) raises:
         """Set or update a value in a JSON object.
@@ -564,14 +498,11 @@ struct Value(Copyable, Movable, Writable):
             owned.object_values.append(owned_value^)
 
         var rebuilt = _serialize_into_value(owned)
-        # Mutation always lands in the legacy representation: drop the
-        # tape-backed view (if any) and replace the legacy fields.
-        self._is_view = False
-        self._tape_idx = -1
-        self._type = 6
-        self._raw = rebuilt._raw
-        self._keys = rebuilt._keys.copy()
-        self._count = rebuilt._count
+        # Install the rebuilt tape view in place of the current one.
+        self._is_view = True
+        self._doc = rebuilt._doc.copy()
+        self._tape_idx = rebuilt._tape_idx
+        self._type = rebuilt._type
 
     def set(mut self, index: Int, value: Value) raises:
         """Set a value at an array index.
@@ -595,11 +526,10 @@ struct Value(Copyable, Movable, Writable):
         owned.array_val[index] = owned_value^
 
         var rebuilt = _serialize_into_value(owned)
-        self._is_view = False
-        self._tape_idx = -1
-        self._type = 5
-        self._raw = rebuilt._raw
-        self._count = rebuilt._count
+        self._is_view = True
+        self._doc = rebuilt._doc.copy()
+        self._tape_idx = rebuilt._tape_idx
+        self._type = rebuilt._type
 
     def append(mut self, value: Value) raises:
         """Append a value to a JSON array.
@@ -619,11 +549,10 @@ struct Value(Copyable, Movable, Writable):
         owned.array_val.append(owned_value^)
 
         var rebuilt = _serialize_into_value(owned)
-        self._is_view = False
-        self._tape_idx = -1
-        self._type = 5
-        self._raw = rebuilt._raw
-        self._count = rebuilt._count
+        self._is_view = True
+        self._doc = rebuilt._doc.copy()
+        self._tape_idx = rebuilt._tape_idx
+        self._type = rebuilt._type
 
     def set_at(mut self, pointer: String, value: Value) raises:
         """Set a nested value via JSON Pointer (RFC 6901).
@@ -661,17 +590,10 @@ struct Value(Copyable, Movable, Writable):
         _set_at_pointer(tree, tokens, 0, new_val^)
 
         var rebuilt = _serialize_into_value(tree)
-        # Mutation always lands in the legacy representation.
-        self._is_view = False
-        self._tape_idx = -1
+        self._is_view = True
+        self._doc = rebuilt._doc.copy()
+        self._tape_idx = rebuilt._tape_idx
         self._type = rebuilt._type
-        self._bool = rebuilt._bool
-        self._int = rebuilt._int
-        self._float = rebuilt._float
-        self._string = rebuilt._string
-        self._raw = rebuilt._raw
-        self._keys = rebuilt._keys.copy()
-        self._count = rebuilt._count
 
     def at(self, pointer: String) raises -> Value:
         """Navigate to a value using JSON Pointer (RFC 6901).
@@ -703,38 +625,26 @@ struct Value(Copyable, Movable, Writable):
             raise Error("JSON Pointer must start with '/' or be empty")
 
         var tokens = _parse_json_pointer(pointer)
-        return _navigate_pointer(self, tokens)
-
-
-def make_array_value(raw: String, count: Int) -> Value:
-    """Create a legacy (lazy / raw-substring) array Value.
-
-    Slated for removal in commit 3 of the "Remove lazy v0.1
-    representation from `Value`" plan; only `_navigate_pointer` and
-    the v0.1 lazy CPU parser still call this.
-    """
-    var v = Value(Null())
-    v._is_view = False
-    v._type = 5
-    v._raw = raw
-    v._count = count
-    return v^
-
-
-def make_object_value(raw: String, var keys: List[String]) -> Value:
-    """Create a legacy (lazy / raw-substring) object Value.
-
-    Slated for removal in commit 3 of the "Remove lazy v0.1
-    representation from `Value`" plan; only `_navigate_pointer` and
-    the v0.1 lazy CPU parser still call this.
-    """
-    var v = Value(Null())
-    v._is_view = False
-    v._type = 6
-    v._raw = raw
-    v._count = len(keys)
-    v._keys = keys^
-    return v^
+        var current = self.copy()
+        for i in range(len(tokens)):
+            var token = tokens[i]
+            if current.is_object():
+                current = current[token]
+            elif current.is_array():
+                var index: Int
+                try:
+                    index = atol(token)
+                except:
+                    raise Error("Array index must be a number: " + token)
+                if index < 0:
+                    raise Error("Array index cannot be negative: " + token)
+                current = current[index]
+            else:
+                raise Error(
+                    "Cannot navigate into primitive value with pointer: /"
+                    + token
+                )
+        return current^
 
 
 # ---------------------------------------------------------------------------
@@ -783,153 +693,8 @@ def _value_to_json(v: Value) -> String:
     return "null"
 
 
-def _parse_json_value_to_value(json_str: String) raises -> Value:
-    """Parse a raw JSON value string into a Value.
-
-    Used by `Value.__getitem__`, `Value.array_items`, `Value.object_items`,
-    `LazyValue.get`, and `patch.apply_patch` to materialize child values
-    on demand. Phase C replaces this scalar walk with a tape lookup.
-    """
-    var s = json_str
-    var s_bytes = s.as_bytes()
-    var n = len(s_bytes)
-
-    if n == 0:
-        raise Error("Empty JSON value")
-
-    var i = 0
-    while i < n and (
-        s_bytes[i] == UInt8(ord(" "))
-        or s_bytes[i] == UInt8(ord("\t"))
-        or s_bytes[i] == UInt8(ord("\n"))
-        or s_bytes[i] == UInt8(ord("\r"))
-    ):
-        i += 1
-
-    if i >= n:
-        raise Error("Empty JSON value")
-
-    var first_char = s_bytes[i]
-
-    if first_char == UInt8(ord("n")):
-        return Value(Null())
-
-    if first_char == UInt8(ord("t")):
-        return Value(True)
-
-    if first_char == UInt8(ord("f")):
-        return Value(False)
-
-    if first_char == UInt8(ord('"')):
-        var start_idx = i + 1
-        var end_idx = start_idx
-        var has_escapes = False
-        while end_idx < n:
-            var c = s_bytes[end_idx]
-            if c == UInt8(ord("\\")):
-                has_escapes = True
-                end_idx += 2
-                continue
-            if c == UInt8(ord('"')):
-                break
-            end_idx += 1
-
-        if not has_escapes:
-            return Value(
-                String(String(unsafe_from_utf8=s.as_bytes()[start_idx:end_idx]))
-            )
-
-        var unescaped = unescape_json_string_span(s_bytes, start_idx, end_idx)
-        return Value(String(unsafe_from_utf8=unescaped^))
-
-    if first_char == UInt8(ord("-")) or (
-        first_char >= UInt8(ord("0")) and first_char <= UInt8(ord("9"))
-    ):
-        var num_str = String()
-        var is_float = False
-        while i < n:
-            var c = s_bytes[i]
-            if (
-                c == UInt8(ord("-"))
-                or c == UInt8(ord("+"))
-                or (c >= UInt8(ord("0")) and c <= UInt8(ord("9")))
-            ):
-                num_str += chr(Int(c))
-            elif (
-                c == UInt8(ord("."))
-                or c == UInt8(ord("e"))
-                or c == UInt8(ord("E"))
-            ):
-                num_str += chr(Int(c))
-                is_float = True
-            else:
-                break
-            i += 1
-        if is_float:
-            return Value(atof(num_str))
-        else:
-            return Value(atol(num_str))
-
-    if first_char == UInt8(ord("[")):
-        var count = _count_array_elements(s)
-        return make_array_value(s, count)
-
-    if first_char == UInt8(ord("{")):
-        var keys = _extract_object_keys(s)
-        return make_object_value(s, keys^)
-
-    raise Error("Invalid JSON value: " + s)
-
-
-def _navigate_pointer(v: Value, tokens: List[String]) raises -> Value:
-    """Navigate through a Value using parsed pointer tokens."""
-    if len(tokens) == 0:
-        return v.copy()
-
-    var current_raw = v.raw_json() if v.is_array() or v.is_object() else ""
-    var token = tokens[0]
-
-    if v.is_object():
-        var value_str = _extract_field_value(current_raw, token)
-        var child = _parse_json_value_to_value(value_str)
-
-        if len(tokens) == 1:
-            return child^
-
-        var remaining = List[String]()
-        for i in range(1, len(tokens)):
-            remaining.append(tokens[i])
-        return _navigate_pointer(child, remaining^)
-
-    elif v.is_array():
-        var index: Int
-        try:
-            index = atol(token)
-        except:
-            raise Error("Array index must be a number: " + token)
-
-        if index < 0:
-            raise Error("Array index cannot be negative: " + token)
-
-        var value_str = _extract_array_element(current_raw, index)
-        var child = _parse_json_value_to_value(value_str)
-
-        if len(tokens) == 1:
-            return child^
-
-        var remaining = List[String]()
-        for i in range(1, len(tokens)):
-            remaining.append(tokens[i])
-        return _navigate_pointer(child, remaining^)
-
-    else:
-        raise Error(
-            "Cannot navigate into primitive value with pointer: /" + token
-        )
-
-
 # ---------------------------------------------------------------------------
-# Tape-backed view helpers (Phase 2b)
+# Tape-backed view helpers
 # ---------------------------------------------------------------------------
 
 

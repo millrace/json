@@ -7,10 +7,11 @@
 # string-state tracking -- and assert that the two position lists are
 # equal.
 #
-# When the SIMD path eventually beats the scalar path on a given input
-# the default in `parse_two_pass` flips, but the *correctness* contract
-# pinned here never changes: the SIMD implementation has to match the
-# oracle byte-for-byte before it ships at all.
+# When the SIMD path eventually beats the scalar path on a given
+# input the default in `parse_cpu_native_tape` flips, but the
+# *correctness* contract pinned here never changes: the SIMD
+# implementation has to match the oracle byte-for-byte before it
+# ships at all.
 
 from std.testing import assert_equal, assert_true, TestSuite
 from std.collections import List
@@ -351,7 +352,7 @@ def test_two_pass_dumps_round_trip() raises:
     output round-trips through `loads` to an equal Value. This catches
     cursor-desync bugs where stage 2 misinterprets a structural offset.
     """
-    from json.cpu.stage2 import parse_two_pass
+    from json.cpu import parse_cpu_native_tape
     from json import dumps
 
     var fixtures = List[String]()
@@ -369,8 +370,12 @@ def test_two_pass_dumps_round_trip() raises:
     fixtures.append('{"escaped": "a\\"b"}')
 
     for i in range(len(fixtures)):
-        var scalar_v = parse_two_pass[force_scalar=True](fixtures[i])
-        var simd_v = parse_two_pass[force_scalar=False](fixtures[i])
+        var scalar_v = parse_cpu_native_tape[force_scalar=True](
+            fixtures[i].copy()
+        )
+        var simd_v = parse_cpu_native_tape[force_scalar=False](
+            fixtures[i].copy()
+        )
         var lhs = dumps(scalar_v)
         var rhs = dumps(simd_v)
         assert_equal(lhs, rhs, "two-pass mismatch on: " + fixtures[i])

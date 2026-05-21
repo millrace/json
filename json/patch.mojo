@@ -4,7 +4,7 @@
 # JSON Merge Patch: Merge two JSON documents together
 
 from std.collections import List
-from .value import Value, Null, _parse_json_value_to_value
+from .value import Value, Null
 from .parser import loads
 from .serialize import dumps
 

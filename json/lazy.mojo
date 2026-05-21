@@ -3,13 +3,9 @@
 # LazyValue defers parsing until values are actually accessed.
 # This is efficient when you only need a few fields from a large document.
 
-from .value import (
-    Value,
-    Null,
-    _parse_json_value_to_value,
-    _extract_field_value,
-    _extract_array_element,
-)
+from .value import Value, Null
+from .value.raw_ops import _extract_field_value, _extract_array_element
+from .cpu import parse_cpu_native_tape
 
 
 struct LazyValue:
@@ -201,7 +197,7 @@ struct LazyValue:
         Use this when you need the complete parsed structure.
         For accessing specific fields, use get() instead.
         """
-        return _parse_json_value_to_value(self._raw)
+        return parse_cpu_native_tape(self._raw.copy())
 
     def __getitem__(self, key: String) raises -> LazyValue:
         """Get object field as a new LazyValue.
@@ -303,5 +299,4 @@ def _lazy_navigate(raw: String, pointer: String) raises -> Value:
         else:
             raise Error("Cannot navigate into primitive with pointer")
 
-    # Parse the final value
-    return _parse_json_value_to_value(current_raw)
+    return parse_cpu_native_tape(current_raw^)
