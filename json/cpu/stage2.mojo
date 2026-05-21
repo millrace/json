@@ -878,9 +878,21 @@ def _emit_array_to_doc(
     open_offset: Int,
     end: Int,
 ) raises -> UInt64:
-    """Same validation logic as `_parse_array`, but recursively emits
-    child headers into a contiguous block in `doc.tape` and returns the
-    parent ARRAY entry packed with (count, child_start_idx)."""
+    """Emit an ARRAY tape entry. Single forward pass: validates and
+    recurses into each child in one structural-index walk, no separate
+    counting pre-pass.
+
+    Children's headers are collected in a local `headers` list and then
+    written contiguously into `doc.tape`; that's the layout invariant
+    the readers (`Document.get_child_start`) rely on.
+
+    Validation rules (matching `_parse_array`):
+
+    * leading comma   -> error
+    * trailing comma  -> error
+    * double comma    -> error
+    * unmatched close -> caught by `_find_matching_close`
+    """
     var input = doc.input
     if pos_idx >= len(positions) or Int(positions[pos_idx]) != open_offset:
         raise Error("Stage 2: cursor desync at array open")
@@ -894,111 +906,71 @@ def _emit_array_to_doc(
     var close_offset = close.close_offset
 
     var bytes = input.as_bytes()
-    var depth = 0
-    var last_top_comma_byte = -1
-    var prev_top_comma_byte: Int
+    var headers = List[UInt64]()
 
-    # Validation pass: same checks as _parse_array. We only count and
-    # validate; child emission happens in the second walk below so that
-    # we can collect child byte ranges and recurse.
-    var count = 0
-    var k = open_idx + 1
-    while k < close_idx:
-        var off = Int(positions[k])
-        var b = bytes[off]
-        if b == UInt8(ord("[")) or b == UInt8(ord("{")):
-            depth += 1
-        elif b == UInt8(ord("]")) or b == UInt8(ord("}")):
-            depth -= 1
-        elif b == UInt8(ord(",")) and depth == 0:
-            count += 1
-            prev_top_comma_byte = last_top_comma_byte
-            last_top_comma_byte = off
-            if prev_top_comma_byte >= 0:
-                var has_between = False
-                for j in range(prev_top_comma_byte + 1, off):
-                    if not _is_ws(bytes[j]):
-                        has_between = True
-                        break
-                if not has_between:
-                    raise Error(
-                        "Stage 2: empty element between commas in array"
-                        " at offset "
-                        + String(off)
-                    )
-            else:
-                var has_first = False
-                for j in range(open_offset + 1, off):
-                    if not _is_ws(bytes[j]):
-                        has_first = True
-                        break
-                if not has_first:
-                    raise Error(
-                        "Stage 2: leading comma in array at offset "
-                        + String(off)
-                    )
-        elif b == UInt8(ord('"')):
-            k += 1
-        k += 1
+    # Skip leading whitespace inside the brackets.
+    var cursor = open_offset + 1
+    while cursor < close_offset and _is_ws(bytes[cursor]):
+        cursor += 1
 
-    var has_content = False
-    for j in range(open_offset + 1, close_offset):
-        if not _is_ws(bytes[j]):
-            has_content = True
+    # Empty array fast path: `[ ]` with only whitespace between brackets.
+    if cursor >= close_offset:
+        var child_start = len(doc.tape)
+        pos_idx = close_idx + 1
+        return pack_tape_entry(
+            TAPE_TAG_ARRAY,
+            pack_pair(UInt64(0), UInt64(child_start)),
+        )
+
+    if bytes[cursor] == UInt8(ord(",")):
+        raise Error(
+            "Stage 2: leading comma in array at offset " + String(cursor)
+        )
+
+    while True:
+        var pos_before = pos_idx
+        var h = _emit_value_to_doc(
+            doc, positions, pos_idx, cursor, close_offset
+        )
+        headers.append(h)
+
+        var child_end: Int
+        if pos_idx > pos_before:
+            child_end = Int(positions[pos_idx - 1]) + 1
+        else:
+            child_end = _primitive_end(bytes, cursor, close_offset)
+
+        var j = child_end
+        while j < close_offset and _is_ws(bytes[j]):
+            j += 1
+
+        if j >= close_offset:
             break
-    if has_content:
-        count += 1
 
-    if last_top_comma_byte >= 0:
-        var has_value_after_comma = False
-        for j in range(last_top_comma_byte + 1, close_offset):
-            if not _is_ws(bytes[j]):
-                has_value_after_comma = True
-                break
-        if not has_value_after_comma:
+        if bytes[j] != UInt8(ord(",")):
+            # Anything other than ',' or end-of-array here is malformed,
+            # but `_find_matching_close` already verified that
+            # `bytes[close_offset]` is the matching ']'. So we just
+            # break and let validation upstream catch any odd state.
+            break
+
+        # Consume the comma and align pos_idx with the structural index.
+        if pos_idx < len(positions) and Int(positions[pos_idx]) == j:
+            pos_idx += 1
+        j += 1
+        while j < close_offset and _is_ws(bytes[j]):
+            j += 1
+
+        if j >= close_offset:
             raise Error(
-                "Stage 2: trailing comma in array at offset "
-                + String(last_top_comma_byte)
+                "Stage 2: trailing comma in array at offset " + String(j - 1)
             )
-
-    # Emit each child by recursing on its byte range. We re-walk the
-    # structural index to find each top-level child boundary; on the
-    # way, `_emit_value_to_doc` itself advances pos_idx for
-    # strings / arrays / objects but leaves it alone for primitives
-    # (null / true / false / numbers). We track pos_idx before/after
-    # each call to choose between "use the last consumed structural"
-    # and "scan bytes for the primitive's end".
-    var headers = List[UInt64](capacity=count)
-    if count > 0:
-        var child_byte = open_offset + 1
-        while child_byte < close_offset and _is_ws(bytes[child_byte]):
-            child_byte += 1
-        var i = 0
-        while i < count:
-            var pos_before = pos_idx
-            var h = _emit_value_to_doc(
-                doc, positions, pos_idx, child_byte, close_offset
+        if bytes[j] == UInt8(ord(",")):
+            raise Error(
+                "Stage 2: empty element between commas in array at offset "
+                + String(j)
             )
-            headers.append(h)
-            var consumed_end: Int
-            if pos_idx > pos_before:
-                consumed_end = Int(positions[pos_idx - 1]) + 1
-            else:
-                consumed_end = _primitive_end(bytes, child_byte, close_offset)
-            # Skip ws + comma + ws to land on the next child.
-            var j = consumed_end
-            while j < close_offset and _is_ws(bytes[j]):
-                j += 1
-            if j < close_offset and bytes[j] == UInt8(ord(",")):
-                # Keep pos_idx aligned with the structural index by
-                # advancing past this comma if it's the next entry.
-                if pos_idx < len(positions) and Int(positions[pos_idx]) == j:
-                    pos_idx += 1
-                j += 1
-            while j < close_offset and _is_ws(bytes[j]):
-                j += 1
-            child_byte = j
-            i += 1
+        cursor = j
 
     var child_start = len(doc.tape)
     for j in range(len(headers)):
@@ -1007,7 +979,7 @@ def _emit_array_to_doc(
     pos_idx = close_idx + 1
     return pack_tape_entry(
         TAPE_TAG_ARRAY,
-        pack_pair(UInt64(count), UInt64(child_start)),
+        pack_pair(UInt64(len(headers)), UInt64(child_start)),
     )
 
 
@@ -1018,9 +990,19 @@ def _emit_object_to_doc(
     open_offset: Int,
     end: Int,
 ) raises -> UInt64:
-    """Same validation logic as `_parse_object`, but emits a
-    contiguous block of (KEY, VALUE) header entries and returns the
-    parent OBJECT entry packed with (pair_count, child_start_idx)."""
+    """Emit an OBJECT tape entry. Single forward pass: parses keys and
+    values inline, no separate validation walk.
+
+    Children's headers (KEY, VALUE, KEY, VALUE, ...) are collected in
+    a local `headers` list and written contiguously to `doc.tape`.
+
+    Validation rules (matching `_parse_object`):
+
+    * unquoted key   -> error
+    * missing colon  -> error
+    * trailing comma -> error
+    * leading comma  -> error
+    """
     var input = doc.input
     if pos_idx >= len(positions) or Int(positions[pos_idx]) != open_offset:
         raise Error("Stage 2: cursor desync at object open")
@@ -1034,170 +1016,120 @@ def _emit_object_to_doc(
     var close_offset = close.close_offset
 
     var bytes = input.as_bytes()
+    var headers = List[UInt64]()
 
-    # Reuse the v0.1 _parse_object validation walk to collect keys
-    # AND surface every malformed-object error before we touch the
-    # tape. We then re-walk to recurse into each value.
-    var keys = List[String]()
-    var depth = 0
-    var expect_key = True
-    var last_top_colon_byte = -1
-    var last_top_comma_byte = -1
-    var top_comma_count = 0
-    var saw_colon_after_key = True
-    var k = open_idx + 1
-    while k < close_idx:
-        var off = Int(positions[k])
-        var b = bytes[off]
+    # Skip leading whitespace.
+    var cursor = open_offset + 1
+    while cursor < close_offset and _is_ws(bytes[cursor]):
+        cursor += 1
 
-        if b == UInt8(ord("{")) or b == UInt8(ord("[")):
-            depth += 1
-            k += 1
-            continue
-        if b == UInt8(ord("}")) or b == UInt8(ord("]")):
-            depth -= 1
-            k += 1
-            continue
-        if b == UInt8(ord(",")) and depth == 0:
-            expect_key = True
-            saw_colon_after_key = True
-            last_top_comma_byte = off
-            top_comma_count += 1
-            k += 1
-            continue
-        if b == UInt8(ord(":")) and depth == 0:
-            last_top_colon_byte = off
-            saw_colon_after_key = True
-            k += 1
-            continue
-        if b == UInt8(ord('"')):
-            if depth == 0 and expect_key:
-                if k + 1 >= close_idx:
-                    raise Error("Stage 2: malformed object key")
-                var close_quote = Int(positions[k + 1])
-                var key_start = off + 1
-                var key_len = close_quote - key_start
-                var key_bytes = List[UInt8](capacity=key_len)
-                key_bytes.resize(key_len, 0)
-                memcpy(
-                    dest=key_bytes.unsafe_ptr(),
-                    src=bytes.unsafe_ptr() + key_start,
-                    count=key_len,
-                )
-                keys.append(String(unsafe_from_utf8=key_bytes^))
-                expect_key = False
-                saw_colon_after_key = False
-                k += 2
-                continue
-            if depth == 0 and not saw_colon_after_key:
-                raise Error(
-                    "Stage 2: missing ':' between key and value at offset "
-                    + String(off)
-                )
-            k += 2
-            continue
+    # Empty object fast path.
+    if cursor >= close_offset:
+        var child_start = len(doc.tape)
+        pos_idx = close_idx + 1
+        return pack_tape_entry(
+            TAPE_TAG_OBJECT,
+            pack_pair(UInt64(0), UInt64(child_start)),
+        )
 
-        k += 1
+    if bytes[cursor] == UInt8(ord(",")):
+        raise Error(
+            "Stage 2: leading comma in object at offset " + String(cursor)
+        )
 
-    var has_content = False
-    for j in range(open_offset + 1, close_offset):
-        if not _is_ws(bytes[j]):
-            has_content = True
-            break
-    if has_content:
-        var expected_keys = top_comma_count + 1
-        if len(keys) != expected_keys:
+    while True:
+        # Each iteration parses one (key, value) pair.
+        if bytes[cursor] != UInt8(ord('"')):
             raise Error(
-                "Stage 2: expected "
-                + String(expected_keys)
-                + " keys, got "
-                + String(len(keys))
-                + " (likely unquoted or missing key in object)"
+                "Stage 2: expected string key at offset " + String(cursor)
             )
 
-    if last_top_comma_byte >= 0:
-        var has_kv_after_comma = False
-        for j in range(last_top_comma_byte + 1, close_offset):
-            if not _is_ws(bytes[j]):
-                has_kv_after_comma = True
-                break
-        if not has_kv_after_comma:
-            raise Error(
-                "Stage 2: trailing comma in object at offset "
-                + String(last_top_comma_byte)
-            )
+        # Stage 1 already emitted both quote positions for the key;
+        # consume them.
+        if pos_idx + 1 >= len(positions) or Int(positions[pos_idx]) != cursor:
+            raise Error("Stage 2: cursor desync at object key")
+        var key_close = Int(positions[pos_idx + 1])
+        pos_idx += 2
 
-    if last_top_colon_byte >= 0:
-        var has_value_after_colon = False
-        var stop = close_offset
-        if last_top_comma_byte > last_top_colon_byte:
-            stop = last_top_comma_byte
-        for j in range(last_top_colon_byte + 1, stop):
-            if not _is_ws(bytes[j]):
-                has_value_after_colon = True
+        # Intern the key into key_pool. We unescape if needed so
+        # downstream `Document.get_key` returns plain text.
+        var key_start = cursor + 1
+        var key_len = key_close - key_start
+        var has_escape = False
+        for j in range(key_start, key_close):
+            if bytes[j] == UInt8(ord("\\")):
+                has_escape = True
                 break
-        if not has_value_after_colon:
+        var key: String
+        if has_escape:
+            _validate_escapes(bytes, key_start, key_close)
+            var unesc = unescape_json_string_span(bytes, key_start, key_close)
+            key = String(unsafe_from_utf8=unesc^)
+        else:
+            var key_bytes = List[UInt8](capacity=key_len)
+            key_bytes.resize(key_len, 0)
+            memcpy(
+                dest=key_bytes.unsafe_ptr(),
+                src=bytes.unsafe_ptr() + key_start,
+                count=key_len,
+            )
+            key = String(unsafe_from_utf8=key_bytes^)
+        var key_pool_idx = len(doc.key_pool)
+        doc.key_pool.append(key^)
+        var key_header = pack_tape_entry(TAPE_TAG_KEY, UInt64(key_pool_idx))
+
+        # Find the colon after the key.
+        var after_key = key_close + 1
+        while after_key < close_offset and _is_ws(bytes[after_key]):
+            after_key += 1
+        if after_key >= close_offset or bytes[after_key] != UInt8(ord(":")):
+            raise Error(
+                "Stage 2: missing ':' between key and value at offset "
+                + String(after_key)
+            )
+        if pos_idx < len(positions) and Int(positions[pos_idx]) == after_key:
+            pos_idx += 1
+        var value_start = after_key + 1
+        while value_start < close_offset and _is_ws(bytes[value_start]):
+            value_start += 1
+        if value_start >= close_offset:
             raise Error(
                 "Stage 2: missing value after ':' at offset "
-                + String(last_top_colon_byte)
+                + String(after_key)
             )
 
-    # Second walk: recurse into each value and collect (key_header,
-    # value_header) pairs, then write them contiguously.
-    var pair_count = len(keys)
-    var headers = List[UInt64](capacity=2 * pair_count)
-    if pair_count > 0:
-        var i = 0
-        var cursor = open_offset + 1
-        while i < pair_count:
-            while cursor < close_offset and _is_ws(bytes[cursor]):
-                cursor += 1
-            # The key is a quoted string starting at `cursor`. Stage 1
-            # emitted both quote positions; advance pos_idx past them.
-            if (
-                pos_idx + 1 >= len(positions)
-                or Int(positions[pos_idx]) != cursor
-            ):
-                raise Error("Stage 2: cursor desync at object key")
-            var key_close = Int(positions[pos_idx + 1])
-            pos_idx += 2
-            # Intern the key into key_pool.
-            var key_pool_idx = len(doc.key_pool)
-            doc.key_pool.append(keys[i])
-            var key_header = pack_tape_entry(TAPE_TAG_KEY, UInt64(key_pool_idx))
-            # The next structural is the `:` at byte c2. Advance
-            # pos_idx past it before recursing into the value.
-            var c2 = key_close + 1
-            while c2 < close_offset and bytes[c2] != UInt8(ord(":")):
-                c2 += 1
-            if pos_idx < len(positions) and Int(positions[pos_idx]) == c2:
-                pos_idx += 1
-            var value_start = c2 + 1
-            var pos_before = pos_idx
-            var value_header = _emit_value_to_doc(
-                doc, positions, pos_idx, value_start, close_offset
-            )
-            headers.append(key_header)
-            headers.append(value_header)
-            # Compute where this value ends in bytes -- pos_idx may or
-            # may not have advanced (advances for string / array /
-            # object children; not for primitives).
-            var value_end: Int
-            if pos_idx > pos_before:
-                value_end = Int(positions[pos_idx - 1]) + 1
-            else:
-                value_end = _primitive_end(bytes, value_start, close_offset)
-            # Skip ws + comma + ws to the next key.
-            var j = value_end
-            while j < close_offset and _is_ws(bytes[j]):
-                j += 1
-            if j < close_offset and bytes[j] == UInt8(ord(",")):
-                if pos_idx < len(positions) and Int(positions[pos_idx]) == j:
-                    pos_idx += 1
-                j += 1
-            cursor = j
-            i += 1
+        var pos_before = pos_idx
+        var value_header = _emit_value_to_doc(
+            doc, positions, pos_idx, value_start, close_offset
+        )
+        headers.append(key_header)
+        headers.append(value_header)
 
+        var value_end: Int
+        if pos_idx > pos_before:
+            value_end = Int(positions[pos_idx - 1]) + 1
+        else:
+            value_end = _primitive_end(bytes, value_start, close_offset)
+
+        var j = value_end
+        while j < close_offset and _is_ws(bytes[j]):
+            j += 1
+        if j >= close_offset:
+            break
+        if bytes[j] != UInt8(ord(",")):
+            break
+        if pos_idx < len(positions) and Int(positions[pos_idx]) == j:
+            pos_idx += 1
+        j += 1
+        while j < close_offset and _is_ws(bytes[j]):
+            j += 1
+        if j >= close_offset:
+            raise Error(
+                "Stage 2: trailing comma in object at offset " + String(j - 1)
+            )
+        cursor = j
+
+    var pair_count = len(headers) // 2
     var child_start = len(doc.tape)
     for j in range(len(headers)):
         doc.tape.append(headers[j])
