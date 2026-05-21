@@ -15,6 +15,7 @@ from .value import (
     Null,
     make_array_value,
     make_object_value,
+    make_view_value,
     _value_to_json,
     _parse_json_value_to_value,
     _navigate_pointer,
