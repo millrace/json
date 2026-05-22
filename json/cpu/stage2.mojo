@@ -47,6 +47,22 @@ from std.bit import count_trailing_zeros
 from std.collections import List
 from std.memory import memcpy
 from std.memory.unsafe import pack_bits
+from std.sys import simd_byte_width
+
+
+# Native SIMD chunk size in bytes for stage 2's helpers (`_skip_ws`,
+# `_string_has_escape`). Picking the host's vector register width
+# means a single load + eq + reduce per iteration on every backend:
+#
+#   * NEON (Apple Silicon, 128-bit): 16 bytes
+#   * AVX2 (most x86):              32 bytes
+#   * AVX-512 (Sapphire Rapids+):   64 bytes
+#
+# Mojo's SIMD docs explicitly recommend not exceeding 2x register
+# width or "the resulting code will perform poorly", so a hard-coded
+# 32 was a 2x penalty on NEON. simd_byte_width() defers to the
+# Mojo compiler's per-target answer.
+comptime _BLOCK: Int = simd_byte_width()
 
 from ..unicode import unescape_json_string_span
 from ..document import (
@@ -78,21 +94,23 @@ def _string_has_escape(bytes: Span[UInt8, _], start: Int, end: Int) -> Bool:
     """SIMD-accelerated scan for backslash in [start, end).
 
     The dominant case on real JSON corpora is "no escape", so we scan
-    32 bytes at a time using `SIMD.eq` + `reduce_or` and only fall
-    back to a scalar loop for the tail (< 32 bytes) and to confirm
-    position when we *do* find one.
+    `_BLOCK` bytes at a time (16 on NEON, 32 on AVX2, 64 on AVX-512)
+    using `SIMD.eq` + `reduce_or`. Each iteration is a single native
+    SIMD load + eq + reduce; using more than the host register width
+    would force the compiler to split into multiple instructions.
+    Tail (< _BLOCK bytes) is handled scalar.
     """
     var n = end - start
     if n <= 0:
         return False
     var ptr = bytes.unsafe_ptr()
     var i = start
-    var stop = end - 32
+    var stop = end - _BLOCK
     while i <= stop:
-        var chunk = ptr.load[width=32](i)
+        var chunk = ptr.load[width=_BLOCK](i)
         if chunk.eq(UInt8(ord("\\"))).reduce_or():
             return True
-        i += 32
+        i += _BLOCK
     while i < end:
         if ptr[i] == UInt8(ord("\\")):
             return True
@@ -119,9 +137,13 @@ def _skip_ws(bytes: Span[UInt8, _], start: Int, end: Int) -> Int:
         where there is 0-1 whitespace bytes between fields - no SIMD
         setup cost).
       * Only if we're still in whitespace after that do we fall into
-        the SIMD 32-byte loop, which uses pack_bits +
+        the SIMD `_BLOCK`-byte loop, which uses pack_bits +
         count_trailing_zeros to find the first non-whitespace byte
         without per-byte iteration.
+
+    `_BLOCK` is `simd_byte_width()`, so each iteration is a single
+    native SIMD instruction on every backend (16 B NEON, 32 B AVX2,
+    64 B AVX-512) instead of a 2x or 4x register-width split.
 
     Pretty-printed corpora (citm: ~9 ws bytes/pair) hit the SIMD path;
     compact corpora pay only a single scalar byte test.
@@ -138,20 +160,37 @@ def _skip_ws(bytes: Span[UInt8, _], start: Int, end: Int) -> Int:
         return i
 
     # SIMD body for long whitespace runs.
-    var stop = end - 32
+    var stop = end - _BLOCK
     while i <= stop:
-        var chunk = ptr.load[width=32](i)
+        var chunk = ptr.load[width=_BLOCK](i)
         var is_ws_mask = (
             chunk.eq(UInt8(ord(" ")))
             | chunk.eq(UInt8(ord("\t")))
             | chunk.eq(UInt8(ord("\n")))
             | chunk.eq(UInt8(ord("\r")))
         )
-        var ws_bits = pack_bits[dtype=DType.uint32](is_ws_mask)
-        if ws_bits != UInt32(0xFFFF_FFFF):
-            var first_non_ws = Int(count_trailing_zeros(~ws_bits))
-            return i + first_non_ws
-        i += 32
+
+        # pack_bits' output dtype must hold _BLOCK bits. Comptime
+        # branch picks the right width with no runtime cost.
+        @parameter
+        if _BLOCK == 16:
+            var ws_bits = pack_bits[dtype=DType.uint16](is_ws_mask)
+            if ws_bits != UInt16(0xFFFF):
+                var first_non_ws = Int(count_trailing_zeros(~ws_bits))
+                return i + first_non_ws
+        elif _BLOCK == 32:
+            var ws_bits = pack_bits[dtype=DType.uint32](is_ws_mask)
+            if ws_bits != UInt32(0xFFFF_FFFF):
+                var first_non_ws = Int(count_trailing_zeros(~ws_bits))
+                return i + first_non_ws
+        elif _BLOCK == 64:
+            var ws_bits = pack_bits[dtype=DType.uint64](is_ws_mask)
+            if ws_bits != UInt64(0xFFFF_FFFF_FFFF_FFFF):
+                var first_non_ws = Int(count_trailing_zeros(~ws_bits))
+                return i + first_non_ws
+        else:
+            constrained[False, "unsupported simd_byte_width()"]()
+        i += _BLOCK
 
     while i < end and _is_ws(ptr[i]):
         i += 1
