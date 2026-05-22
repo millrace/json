@@ -592,11 +592,17 @@ def _emit_array(
             )
         cursor = next_cursor
 
-    # Flush this frame's children to doc.tape and shrink the scratch.
+    # Flush this frame's children to doc.tape via memcpy and shrink
+    # the scratch.
     var count = len(headers_scratch) - headers_lo
     var child_start = len(doc.tape)
-    for k in range(headers_lo, len(headers_scratch)):
-        doc.tape.append(headers_scratch[k])
+    if count > 0:
+        doc.tape.resize(child_start + count, 0)
+        memcpy(
+            dest=doc.tape.unsafe_ptr() + child_start,
+            src=headers_scratch.unsafe_ptr() + headers_lo,
+            count=count,
+        )
     headers_scratch.shrink(headers_lo)
 
     return pack_tape_entry(
@@ -750,10 +756,16 @@ def _emit_object(
             )
         cursor = next_cursor
 
-    var pair_count = (len(headers_scratch) - headers_lo) // 2
+    var total = len(headers_scratch) - headers_lo
+    var pair_count = total // 2
     var child_start = len(doc.tape)
-    for k in range(headers_lo, len(headers_scratch)):
-        doc.tape.append(headers_scratch[k])
+    if total > 0:
+        doc.tape.resize(child_start + total, 0)
+        memcpy(
+            dest=doc.tape.unsafe_ptr() + child_start,
+            src=headers_scratch.unsafe_ptr() + headers_lo,
+            count=total,
+        )
     headers_scratch.shrink(headers_lo)
 
     return pack_tape_entry(
