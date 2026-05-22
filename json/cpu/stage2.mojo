@@ -43,8 +43,10 @@
 # raise structured errors during the walk; coverage in
 # `tests/test_stage2_tape.mojo`.
 
+from std.bit import count_trailing_zeros
 from std.collections import List
 from std.memory import memcpy
+from std.memory.unsafe import pack_bits
 
 from ..unicode import unescape_json_string_span
 from ..document import (
@@ -110,8 +112,48 @@ def _is_ws(b: UInt8) -> Bool:
 
 @always_inline
 def _skip_ws(bytes: Span[UInt8, _], start: Int, end: Int) -> Int:
+    """Skip ASCII whitespace.
+
+    Branch-prediction-friendly hybrid:
+      * The first ~4 bytes are checked scalar (the dense-JSON case
+        where there is 0-1 whitespace bytes between fields - no SIMD
+        setup cost).
+      * Only if we're still in whitespace after that do we fall into
+        the SIMD 32-byte loop, which uses pack_bits +
+        count_trailing_zeros to find the first non-whitespace byte
+        without per-byte iteration.
+
+    Pretty-printed corpora (citm: ~9 ws bytes/pair) hit the SIMD path;
+    compact corpora pay only a single scalar byte test.
+    """
     var i = start
-    while i < end and _is_ws(bytes[i]):
+    var ptr = bytes.unsafe_ptr()
+
+    # Scalar prelude (up to 4 bytes). Common case for compact / dense
+    # JSON: returns after the first byte test.
+    var scalar_stop = min(end, start + 4)
+    while i < scalar_stop and _is_ws(ptr[i]):
+        i += 1
+    if i < scalar_stop:
+        return i
+
+    # SIMD body for long whitespace runs.
+    var stop = end - 32
+    while i <= stop:
+        var chunk = ptr.load[width=32](i)
+        var is_ws_mask = (
+            chunk.eq(UInt8(ord(" ")))
+            | chunk.eq(UInt8(ord("\t")))
+            | chunk.eq(UInt8(ord("\n")))
+            | chunk.eq(UInt8(ord("\r")))
+        )
+        var ws_bits = pack_bits[dtype=DType.uint32](is_ws_mask)
+        if ws_bits != UInt32(0xFFFF_FFFF):
+            var first_non_ws = Int(count_trailing_zeros(~ws_bits))
+            return i + first_non_ws
+        i += 32
+
+    while i < end and _is_ws(ptr[i]):
         i += 1
     return i
 
