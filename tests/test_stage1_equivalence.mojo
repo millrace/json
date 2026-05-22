@@ -336,15 +336,17 @@ def test_stage1_equivalence_on_real_corpora() raises:
 
     for i in range(len(fixtures)):
         var path = fixtures[i]
+        var content: String
         try:
-            var content = Path(path).read_text()
-            var scalar = parse_structural_scalar(content)
-            var simd = parse_structural_simd(content)
-            _assert_indices_equal(path, scalar, simd)
+            content = Path(path).read_text()
         except:
             # Fixture not present in this checkout (the large 804MB
             # file isn't always vendored); skip rather than fail.
             print("  skipped (missing):", path)
+            continue
+        var scalar = parse_structural_scalar(content)
+        var simd = parse_structural_simd(content)
+        _assert_indices_equal(path, scalar, simd)
 
 
 def test_two_pass_dumps_round_trip() raises:

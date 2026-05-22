@@ -1,75 +1,42 @@
-# SIMD stage 1: structural-index builder using `pack_bits`.
+# SIMD stage 1: structural-index builder, branchless 64-byte path.
 #
 # This is the SIMD counterpart of `stage1_scalar.parse_structural_scalar`.
-# It scans the input in 32-byte chunks, classifies each byte via a
-# PSHUFB-style nibble lookup (Phase 2 of v0.2's parity push), then uses
-# `pack_bits` to convert the resulting per-category bool masks into
-# 32-bit bitmaps so we can iterate match positions with
-# `count_trailing_zeros`.
+# Phase 3 (parity push v0.2) replaces the per-marker scalar escape /
+# in-string state machine with branchless 64-bit bit-twiddling on each
+# 64-byte chunk:
 #
-# Classifier ----------------------------------------------------------------
+#   1. Two PSHUFB-style nibble lookups classify every byte into one of
+#      `\" \\ { } [ ] : ,` or "non-marker" -- inherited from Phase 2.
+#   2. `pack_bits` turns the per-byte category bools into three uint64
+#      bitmaps (struct, quote, bslash) for the chunk.
+#   3. `find_escape_mask64` (simdjson-style branchless escape scanner)
+#      computes which bytes are escaped from the bslash mask alone.
+#   4. `prefix_xor64` over the unescaped-quote mask gives a "is byte i
+#      inside a string?" mask for the entire chunk in one shot.
+#   5. Final per-chunk emit mask = (struct outside strings) | (every
+#      string-boundary quote). That mask is iterated bit-by-bit with
+#      `count_trailing_zeros` -- no per-marker branches, no per-marker
+#      classifier reads, no scalar escape resolver.
 #
-# The previous Phase-1 walker did eight independent `.eq()` SIMD compares
-# per chunk -- one for each of `{`, `}`, `[`, `]`, `:`, `,`, `"`, `\\`.
-# That's eight SIMD comparison instructions plus six ORs to assemble the
-# per-category masks before `pack_bits`. simdjson uses two PSHUFBs (one
-# for the low nibble, one for the high nibble) plus an AND -- a 4x
-# reduction in classifier ops, which on Apple Silicon's NEON happens to
-# be the dominant stage 1 cost.
+# The previous Phase-2 walker still touched `classified[bit]` once per
+# marker to dispatch on category; that's gone. The only data-dependent
+# branch in the chunk loop is the bit-iteration loop itself, which is
+# proportional to the total number of structural characters in the
+# input -- not the number of bytes scanned.
 #
-# We replicate that here via Mojo's `SIMD._dynamic_shuffle`, which
-# lowers to `pshufb` on x86 SSE4+ and `vqtbl1q` on ARM64. Crucially this
-# is a single comptime call: the same source produces the right
-# instruction on every supported ISA, with an automatic scalar fallback
-# for ISAs that don't have a byte-permute. No `__attribute__((target))`
-# fan-out, no per-arch source duplication.
+# Cross-chunk state is two scalars (`prev_in_string` carry and
+# `prev_escape` carry); both are updated by simple shifts/AND at the
+# end of each iteration.
 #
-# Each byte is classified by ANDing two 16-entry tables, indexed by the
-# byte's low and high nibbles respectively. The table values are
-# bit-encoded so that exactly one bit survives per marker class:
-#
-#     bit 0 = `"`              bit 4 = `\\`
-#     bit 1 = `:`              bit 5 = `,`
-#     bit 2 = `[`              bit 6 = `{`
-#     bit 3 = `]`              bit 7 = `}`
-#
-# `low_table[low_nibble] & high_table[high_nibble]` then yields:
-#   - 0x00         for non-markers (every other byte in the corpus),
-#   - 0x01         for a `"`,
-#   - 0x10         for a `\\`,
-#   - 0x02 / 0x04 / 0x08 / 0x20 / 0x40 / 0x80
-#                  for the six structural characters.
-#
-# We extract the three category bools (`struct`, `quote`, `bslash`) from
-# the classifier output via cheap bitmask ANDs and feed them through
-# `pack_bits` exactly as before. The escape-state resolver and the
-# scalar tail loop are unchanged -- their cost is dominated by the
-# carry-less-multiply gap that Phase 3 closes.
-#
-# String/escape state -------------------------------------------------------
-#
-# JSON's "is this byte inside a string?" rule depends on a byte-by-byte
-# escape-state machine: `\"` does not close a string, `\\"` does, etc.
-# A true SIMD stage 1 uses CLMUL to turn this into a SIMD-friendly
-# prefix XOR. That's Phase 3 -- this file still falls back to a per-chunk
-# scalar resolver over the marker positions only (still cheap because we
-# touch only those positions, not every byte).
-#
-# Important subtlety: the marker walk only iterates positions that hit
-# `{ } [ ] : , \\ "`. An escape consumes the byte at `bslash + 1`, which
-# may NOT be a marker -- it could be `n`, `t`, `u`, an arbitrary text
-# byte, etc. Carrying `escaped` to the next *marker* (regardless of
-# distance) is therefore wrong: a non-marker byte between the backslash
-# and the next marker would already have consumed the escape silently.
-# We track the absolute position of the backslash that set the escape
-# and only honor the escape when the next visited position is exactly
-# `bslash_pos + 1`. The same rule applies across chunk boundaries.
+# Output stays byte-for-byte identical to
+# `stage1_scalar.parse_structural_scalar`; the equivalence is enforced
+# by `tests/test_stage1_equivalence.mojo` on every benchmark corpus.
 
 from std.collections import List
 from std.bit import count_trailing_zeros
 from std.memory.unsafe import pack_bits
-from std.sys import CompilationTarget
 
+from .simd_clmul import prefix_xor64, find_escape_mask64
 from .stage1_scalar import StructuralIndex
 
 
@@ -78,13 +45,13 @@ from .stage1_scalar import StructuralIndex
 # ---------------------------------------------------------------------------
 
 
-comptime SIMD_WIDTH: Int = 32
-"""Bytes processed per SIMD iteration. Picked to match common AVX2 / NEON
-register sizes; `pack_bits` produces a 32-bit mask we iterate with
-`count_trailing_zeros`."""
+comptime SIMD_WIDTH: Int = 64
+"""Bytes processed per SIMD iteration. 64 lets us pack each per-chunk
+classifier output into a single uint64, which is exactly the width
+both the prefix-XOR and the simdjson escape-scanner work on natively."""
 
 
-# Category-bit masks (matches the PSHUFB table encoding above).
+# Category-bit masks (matches the PSHUFB table encoding below).
 comptime _CAT_QUOTE: UInt8 = 0x01
 """Bit 0 of the classifier output: byte is `\"`."""
 comptime _CAT_BSLASH: UInt8 = 0x10
@@ -97,9 +64,10 @@ comptime _CAT_STRUCT_MASK: UInt8 = 0xEE
 # ---------------------------------------------------------------------------
 # PSHUFB-style nibble-lookup classifier.
 #
-# Given a 32-byte chunk, returns a 32-byte SIMD vector where each lane
+# Given a 64-byte chunk, returns a 64-byte SIMD vector where each lane
 # is the classifier byte for the corresponding input byte (0 for
-# non-markers; one of the bits above for markers).
+# non-markers; one of the bits above for markers). Same encoding as
+# Phase 2; the difference is the wider chunk size.
 # ---------------------------------------------------------------------------
 
 
@@ -107,20 +75,7 @@ comptime _CAT_STRUCT_MASK: UInt8 = 0xEE
 def _classify_chunk[
     W: Int
 ](chunk: SIMD[DType.uint8, W]) -> SIMD[DType.uint8, W]:
-    """Two-PSHUFB nibble-lookup marker classifier.
-
-    Indexes `_LOW_TABLE` by the low nibble of each input byte and
-    `_HIGH_TABLE` by the high nibble; ANDs the two lookups. The result
-    has at most one bit set per byte, and zero for any byte that is not
-    one of `\" \\ { } [ ] : ,`.
-
-    The lookup is implemented via `SIMD._dynamic_shuffle`, which lowers
-    to `pshufb` (x86 SSE4+/AVX2) or `vqtbl1q` (ARM64 NEON). On ISAs
-    without a byte-permute it falls back to an unrolled scalar gather
-    -- still correct, just not the fast path.
-    """
-    # Tables encoded so that low_table[low(b)] & high_table[high(b)]
-    # leaves exactly one category bit set per marker.
+    """Two-PSHUFB nibble-lookup marker classifier."""
     comptime _LOW_TABLE = SIMD[DType.uint8, 16](
         # idx:  0     1     2     3     4     5     6     7
         0x00,
@@ -175,113 +130,125 @@ def _classify_chunk[
 
 
 def parse_structural_simd(input: String) -> StructuralIndex:
-    """Build a structural index using a SIMD scan.
+    """Build a structural index using a branchless SIMD scan.
 
     Output is byte-for-byte identical to
     `stage1_scalar.parse_structural_scalar(input)` -- the equivalence is
     enforced by `tests/test_stage1_equivalence.mojo`, including a
     full-document run against the benchmark corpora.
 
-    Faster than the scalar walker by ~1.3x to ~1.5x on the benchmark
-    corpora after Phase 2; this is the default stage 1 used by
-    `parse_cpu_native_tape`.
+    The previous Phase-2 walker spent the bulk of its time in the
+    per-marker dispatch loop deciding "is this `\\` an escape, is this
+    `\"` already escaped, is this `,` inside a string?". Phase 3 turns
+    all of those questions into branchless bit-twiddling on the
+    per-chunk uint64 masks, leaving just one loop -- iterating set
+    bits in the final emit mask with `count_trailing_zeros`.
     """
     var bytes = input.as_bytes()
     var n = len(bytes)
     var index = StructuralIndex(capacity=n // 4)
 
-    var in_string = False
-    # Absolute position of the most recent backslash that has not yet
-    # had its escape consumed. -1 means "no pending escape". The byte
-    # actually escaped is bslash_pos + 1, regardless of whether it is
-    # a marker or a non-marker.
-    var bslash_pos: Int = -1
+    # Carries between 64-byte chunks.
+    #
+    # `prev_in_string` is full-width: 0 means "we entered this chunk
+    # outside any string", `~UInt64(0)` means "inside". It's used as
+    # an XOR mask against `prefix_xor64` of the unescaped-quote bitmap.
+    #
+    # `prev_escape` is 0 or 1; bit 0 is set iff byte 0 of the next
+    # chunk is escaped by a backslash that ended the prior chunk.
+    var prev_in_string: UInt64 = 0
+    var prev_escape: UInt64 = 0
     var i = 0
 
     while i + SIMD_WIDTH <= n:
         var chunk = bytes.unsafe_ptr().load[width=SIMD_WIDTH](i)
 
-        # Two-PSHUFB classifier: one byte out per input byte, with at
-        # most one category bit set. We read per-marker categories
-        # straight out of `classified` via `extractelement`, so we only
-        # need ONE `pack_bits` (for the iteration bitmap) instead of
-        # the four the Phase-1 walker computed.
+        # --- Classify ----------------------------------------------------
+        comptime W = SIMD[DType.uint8, SIMD_WIDTH]
         var classified = _classify_chunk(chunk)
 
-        comptime W = SIMD[DType.uint8, SIMD_WIDTH]
-        var any_marker = classified.ne(W(0))
-        var any_mask = pack_bits[dtype=DType.uint32](any_marker)
+        var struct_bool = (classified & W(_CAT_STRUCT_MASK)).ne(W(0))
+        var quote_bool = (classified & W(_CAT_QUOTE)).ne(W(0))
+        var bslash_bool = (classified & W(_CAT_BSLASH)).ne(W(0))
 
-        # Fast path: no markers in this chunk and we're not inside a
-        # string. Any pending escape that pointed inside this chunk is
-        # silently consumed by a non-marker byte; pending escapes that
-        # point past the end of this chunk (only possible if the prior
-        # chunk ended with `\\` at its last byte) survive into the next
-        # chunk.
-        if any_mask == 0 and not in_string:
-            if bslash_pos >= 0 and bslash_pos < i + SIMD_WIDTH - 1:
-                bslash_pos = -1
+        var struct_mask = pack_bits[dtype=DType.uint64](struct_bool)
+        var quote_mask = pack_bits[dtype=DType.uint64](quote_bool)
+        var bslash_mask = pack_bits[dtype=DType.uint64](bslash_bool)
+
+        # Fast path A: chunk has no markers AT ALL and we're outside a
+        # string. This is the common shape for chunks that fall in the
+        # middle of long string values (URLs, base64 blobs, prose).
+        # The chunk contributes nothing and the carries don't change.
+        if (
+            struct_mask == 0
+            and quote_mask == 0
+            and bslash_mask == 0
+            and prev_in_string == 0
+            and prev_escape == 0
+        ):
             i += SIMD_WIDTH
             continue
 
-        # Walk just the marker positions inside this chunk; the rest of
-        # the bytes are uninteresting for stage 1.
-        var local = any_mask
+        # Fast path B: no quotes / no backslashes / no string state.
+        # Then in-string and escape masks are both zero, so emit_mask
+        # collapses to `struct_mask`. Skip the prefix-XOR / escape
+        # compute entirely. Common for chunks of `[1, 2, 3, ...]` /
+        # `{a:1, b:2, ...}` style payloads.
+        if (
+            quote_mask == 0
+            and bslash_mask == 0
+            and prev_in_string == 0
+            and prev_escape == 0
+        ):
+            var local_b = struct_mask
+            while local_b != 0:
+                var bit = Int(count_trailing_zeros(local_b))
+                index.positions.append(UInt32(i + bit))
+                local_b &= local_b - 1
+            i += SIMD_WIDTH
+            continue
+
+        # --- Branchless escape / in-string ------------------------------
+        var escape_mask = find_escape_mask64(bslash_mask, prev_escape)
+        var unescaped_quotes = quote_mask & ~escape_mask
+
+        # `prefix_xor64(q)` flips state at every quote position and
+        # all bytes after, so XORing with `prev_in_string` (extended
+        # to all-1s if we entered the chunk inside a string) yields a
+        # mask where bit i is 1 iff byte i is inside a string at
+        # position i (the opening quote itself reads as "inside",
+        # which is fine because quotes aren't structurals).
+        var in_string_mask = prefix_xor64(unescaped_quotes) ^ prev_in_string
+
+        # --- Final emit mask --------------------------------------------
+        # Structural characters that are outside every string, plus
+        # every unescaped quote (those are the string boundaries that
+        # stage 2 needs in the index). Backslashes never enter the
+        # index regardless of context.
+        var emit_mask = (struct_mask & ~in_string_mask) | unescaped_quotes
+
+        # --- Carry update for next chunk --------------------------------
+        # If bit 63 of in_string_mask is set we exited this chunk
+        # still inside a string; carry the all-1s flag forward.
+        prev_in_string = ~UInt64(0) if (in_string_mask >> UInt64(63)) & UInt64(
+            1
+        ) else UInt64(0)
+        # `prev_escape` was already updated by `find_escape_mask64`.
+
+        # --- Walk emit_mask ---------------------------------------------
+        var local = emit_mask
         while local != 0:
             var bit = Int(count_trailing_zeros(local))
-            var pos = i + bit
-            local &= local - 1  # Clear the bit we just visited.
-
-            # Resolve any pending escape against this exact position.
-            #   pos == bslash_pos + 1  -> this marker IS the escaped
-            #                             byte; skip it and clear the
-            #                             pending escape.
-            #   pos >  bslash_pos + 1  -> the escape was consumed by a
-            #                             non-marker byte that lives
-            #                             between the backslash and
-            #                             this marker; treat the
-            #                             current marker normally.
-            if bslash_pos >= 0:
-                if pos == bslash_pos + 1:
-                    bslash_pos = -1
-                    continue
-                bslash_pos = -1
-
-            # One byte read out of the classifier SIMD: encoded
-            # category bits for this marker.
-            var cat = classified[bit]
-
-            if in_string:
-                if (cat & _CAT_BSLASH) != 0:
-                    bslash_pos = pos
-                    continue
-                if (cat & _CAT_QUOTE) != 0:
-                    index.positions.append(UInt32(pos))
-                    in_string = False
-                continue
-
-            # Outside a string.
-            if (cat & _CAT_QUOTE) != 0:
-                index.positions.append(UInt32(pos))
-                in_string = True
-                continue
-            if (cat & _CAT_STRUCT_MASK) != 0:
-                index.positions.append(UInt32(pos))
-
-        # End of chunk. If a backslash was set during this chunk and
-        # the byte it would escape is still inside this chunk, that
-        # byte was a non-marker (otherwise we'd have visited it above
-        # and cleared bslash_pos). Drop the pending escape so we don't
-        # mis-fire it on the next chunk's first marker.
-        if bslash_pos >= 0 and bslash_pos < i + SIMD_WIDTH - 1:
-            bslash_pos = -1
+            index.positions.append(UInt32(i + bit))
+            local &= local - 1
 
         i += SIMD_WIDTH
 
-    # Tail: handle bytes that didn't fit in the last 32-byte chunk
-    # using the byte-by-byte algorithm (reuse the same logic as
-    # `parse_structural_scalar`'s inner loop).
-    var escaped = bslash_pos >= 0 and bslash_pos == i - 1
+    # Tail: bytes that didn't fit in the last 64-byte chunk. Reuse the
+    # canonical scalar walker logic; we feed it the carries from the
+    # last SIMD chunk so it agrees with `parse_structural_scalar`.
+    var in_string = prev_in_string != 0
+    var escaped = prev_escape != 0
     while i < n:
         var c = bytes[i]
         if escaped:
