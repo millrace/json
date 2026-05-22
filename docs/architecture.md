@@ -66,37 +66,34 @@ bytes for structure.
   and trailing top-level content.
 - `json/cpu/__init__.parse_cpu_native_tape[force_scalar=False|True]`
   -- the public CPU entry point; emits a tape-backed `Value` view.
-  Default is SIMD (1.5x to 2.2x faster than the scalar walker on the
+  Default is SIMD (~1.2x faster than the scalar walker on the
   benchmark corpora); pass `force_scalar=True` for differential
-  testing.
+  testing against the scalar oracle.
 - `tests/test_stage1_equivalence.mojo` -- asserts stage 1 SIMD and
   scalar produce byte-identical position lists, including a
   full-document run against the benchmark corpora.
 
 **Performance (Apple Silicon, M-series; `pixi run -e dev bench-cpu`):**
 
-The bench reports both `parse + peek` and `parse + traverse-every-value`.
-The peek workload is what the lazy `Value` was optimised for; the
-traverse workload is what nearly all real consumers actually do.
+Both benches use the same protocol -- 3 warmup + 100 measured
+iterations, min-time-derived throughput. The bench reports two
+workloads per parser:
 
-| Corpus | Size | simd peek | tape peek | simd traverse | tape traverse | simdjson C++ |
-|---|---|---|---|---|---|---|
-| `twitter.json` | 617 KB | **1.18 GB/s** | 0.23 GB/s | 142.9 ms | **4.17 ms** | 2.66 GB/s |
-| `citm_catalog.json` | 1.7 MB | **1.33 GB/s** | 0.23 GB/s | **701 ms ❌** | **11.38 ms ✅** | 3.13 GB/s |
-| `twitter_large_record.json` | 804 MB | **0.73 GB/s** | 0.15 GB/s | n/a | n/a | 1.47 GB/s |
+* `parse_only` -- `loads(...)` + peek the root tag.
+* `parse_traverse` -- parse + recursively visit every leaf via
+  the public `Value` API.
 
-The `citm_catalog` traverse row is the punchline:
-`simd_traverse` raises `Key not found` mid-walk because the lazy
-`object_items()` re-scans the raw substring for each remembered key,
-and that second scan can disagree with the first on documents with
-duplicate keys or non-trivial escapes. The tape path doesn't have
-this problem because every value is a stable tape index. Tape is
-30-60x faster than the lazy walk *and* the only path that walks
-`citm_catalog` correctly.
+| Corpus | Size | simdjson `parse_only` | mojo `parse_only` (simd) | simdjson `parse_traverse` | mojo `parse_traverse` (simd) |
+|---|---|---|---|---|---|
+| `twitter.json` | 616 KB | 0.189 ms / 3.34 GB/s | 2.51 ms / 0.25 GB/s | 0.215 ms / 2.93 GB/s | 2.88 ms / 0.22 GB/s |
+| `citm_catalog.json` | 1.7 MB | 0.442 ms / 3.91 GB/s | 7.08 ms / 0.24 GB/s | 0.514 ms / 3.36 GB/s | 8.20 ms / 0.21 GB/s |
 
-The peek-only rows still measure something useful -- pure
-parse-validate cost with no DOM consumption -- but the traversal rows
-are the honest CPU comparison.
+The traverse step adds only 13-15% over `parse_only` on the Mojo
+side because every `Value` is a stable tape index -- iteration is
+just a tape walk, not a re-parse. The remaining ~13-16x to simdjson
+is algorithmic (no carry-less multiplication in stage 1, scalar
+number parsing in stage 2, no tape-size pre-estimation); see
+[performance.md](./performance.md) for the breakdown.
 
 **Usage:**
 ```mojo
@@ -193,8 +190,8 @@ flowchart LR
    - Extract structural character bitmap
 3. **Stream Compaction (GPU):** Extract only the positions of structural characters (~50ms)
 4. **Device-to-Host Transfer:** Copy compact position array back to CPU
-5. **Tape Adapter (CPU):** `gpu/tape_adapter.parse_gpu_to_value` merges the GPU `{ } [ ] : ,` positions with a small CPU quote-only scan to produce a stage1-compatible `StructuralIndex`, then runs **stage 2** to construct the `Value`. The v0.1 byte-level re-scan in `_build_array` / `_build_object` is gone.
-6. **Value Tree Construction (CPU):** Build `Value` tree from structural info
+5. **Tape Adapter (CPU):** `gpu/tape_adapter.parse_gpu_to_value` merges the GPU `{ } [ ] : ,` positions with a small CPU quote-only scan to produce a stage1-compatible `StructuralIndex`, then runs **stage 2** to write tape entries into a `Document`.
+6. **Value:** Returned as a tape-backed view (`Value(doc, tape_idx=0)`) over that `Document`; no extra DOM construction step.
 
 ### Why Hybrid GPU/CPU?
 
@@ -213,62 +210,74 @@ See [API Reference](https://ehsanmok.github.io/json/) for complete `Value` metho
 ```
 json/
 ├── __init__.mojo              # Public API exports
-├── parser.mojo                # Unified CPU/GPU parser, loads/load functions
-├── serialize.mojo             # dumps/dump functions
-├── value.mojo                 # Value type definition
-├── types.mojo                 # JSONInput, JSONResult types
-├── iterator.mojo              # JSONIterator for traversing results
-├── ndjson.mojo                # NDJSON parsing/serialization
-├── lazy.mojo                  # On-demand lazy parsing
-├── streaming.mojo             # Streaming parser for large files
-├── config.mojo                # Parser/Serializer configuration
-├── errors.mojo                # Error formatting with line/column
+├── prelude.mojo               # `from json.prelude import *` shortcut
+├── parser.mojo                # Unified CPU/GPU dispatch, loads / load
+├── serialize.mojo             # dumps / dump
+├── document.mojo              # Tape-backed Document (single source of truth)
+├── value/
+│   ├── __init__.mojo         # Re-exports
+│   ├── value.mojo            # Tape-backed Value view
+│   ├── owned.mojo            # OwnedValue + _value_to_owned bridge
+│   └── raw_ops.mojo          # String ops shared with LazyValue
+├── types.mojo                 # JSONInput, JSONResult
+├── iterator.mojo              # JSONIterator
+├── ndjson.mojo                # NDJSON parsing / serialization
+├── lazy.mojo                  # LazyValue (on-demand parsing of substrings)
+├── streaming.mojo             # Streaming parser for huge files
+├── config.mojo                # Parser / serializer configuration
+├── errors.mojo                # Error formatting with line / column
 ├── unicode.mojo               # Unicode escape handling
-├── patch.mojo                 # JSON Patch & Merge Patch (RFC 6902/7396)
-├── jsonpath.mojo              # JSONPath query language
+├── patch.mojo                 # JSON Patch & Merge Patch (RFC 6902 / 7396)
+├── jsonpath.mojo              # JSONPath (RFC 9535)
 ├── schema.mojo                # JSON Schema validation
 ├── reflection.mojo            # Compile-time reflection serde
-├── deserialize.mojo           # serialize_json / deserialize_json API
+├── deserialize.mojo           # serialize_json / deserialize_json
 ├── cpu/
-│   ├── __init__.mojo         # CPU backend exports
+│   ├── __init__.mojo         # CPU dispatch entry points
 │   ├── types.mojo            # Common JSON type constants
-│   ├── mojo_backend.mojo     # Pure Mojo JSON parser
-│   ├── simd_backend.mojo     # SIMD-accelerated CPU parser
-│   ├── simdjson_ffi.mojo     # simdjson FFI bindings
+│   ├── stage1_scalar.mojo    # Byte-by-byte structural index oracle
+│   ├── stage1.mojo           # SIMD structural index (pack_bits)
+│   ├── stage2.mojo           # Index walker -> Document tape
+│   ├── simdjson_ffi.mojo     # simdjson FFI bindings (target='cpu-simdjson')
 │   └── simdjson_ffi/         # C++ simdjson wrapper (libsimdjson via conda)
 └── gpu/
-    ├── parser.mojo            # GPU parser implementation
-    ├── kernels.mojo           # GPU kernel functions
+    ├── parser.mojo            # GPU parser entry points
+    ├── kernels.mojo           # Fused structural-scan kernels
     ├── stream_compact.mojo    # GPU stream compaction
-    └── bracket_match.mojo     # GPU parallel bracket-match (experimental)
+    ├── bracket_match.mojo     # GPU parallel bracket match (experimental)
+    └── tape_adapter.mojo      # GPU positions -> stage 2 -> Document
 
 tests/
-├── test_api.mojo              # Unified API tests (loads/dumps/load/dump)
-├── test_value.mojo            # Value type tests
-├── test_parser.mojo           # Parser tests (simdjson backend)
-├── test_mojo_backend.mojo     # Pure Mojo backend tests
-├── test_serialize.mojo        # Serialization tests
-├── test_serde.mojo            # Struct serialization tests
-├── test_reflection.mojo       # Reflection-based serde tests
-├── test_patch.mojo            # JSON Patch tests
-├── test_jsonpath.mojo         # JSONPath tests
-├── test_schema.mojo           # JSON Schema tests
-├── test_e2e.mojo              # End-to-end tests
-├── test_gpu.mojo              # GPU parser tests
-├── test_gpu_kernels.mojo      # GPU kernel tests (stream compaction)
-├── test_bracket_match.mojo    # GPU bracket-match tests
-└── bench_bracket_match.mojo   # GPU bracket-match microbenchmark
+├── test_api.mojo                   # Unified API (loads / dumps / load / dump)
+├── test_value.mojo                 # Tape-backed Value semantics
+├── test_value_mutation.mojo        # COW mutation propagation
+├── test_document.mojo              # Document / tape construction
+├── test_parser.mojo                # CPU parser (loads dispatch)
+├── test_stage1_equivalence.mojo    # Stage 1 SIMD == scalar oracle
+├── test_stage2_tape.mojo           # Stage 2 tape-emission unit tests
+├── test_backend_equivalence.mojo   # CPU native parser == simdjson FFI
+├── test_serialize.mojo             # Serialization
+├── test_serde.mojo                 # Manual Serializable / Deserializable traits
+├── test_reflection.mojo            # Compile-time reflection serde
+├── test_patch.mojo                 # JSON Patch / Merge Patch
+├── test_jsonpath.mojo              # JSONPath (RFC 9535)
+├── test_schema.mojo                # JSON Schema
+├── test_e2e.mojo                   # End-to-end
+├── test_gpu.mojo                   # GPU parser
+├── test_gpu_kernels.mojo           # GPU kernel correctness (stream compaction)
+├── test_bracket_match.mojo         # GPU bracket-match
+└── bench_bracket_match.mojo        # GPU bracket-match microbenchmark
 
 benchmark/
-├── datasets/                  # Benchmark files
+├── datasets/                       # Benchmark files
 ├── mojo/
-│   ├── bench_cpu.mojo        # CPU benchmark (simdjson FFI)
-│   ├── bench_backend.mojo    # Backend comparison (simdjson vs Mojo)
-│   └── bench_gpu.mojo        # GPU benchmark
+│   ├── bench_cpu.mojo             # CPU bench: parse_only + parse_traverse
+│   ├── bench_backend.mojo         # Cross-backend comparison harness
+│   └── bench_gpu.mojo             # GPU bench
 ├── cpp/
-│   └── bench_simdjson.cpp    # Native simdjson C++ benchmark
-└── cuJSON/                    # Optional cuJSON checkout (cloned manually;
-                               # see benchmark/README.md) for head-to-head
+│   └── bench_simdjson.cpp         # Native simdjson C++ reference bench
+└── cuJSON/                         # Optional cuJSON checkout (cloned manually;
+                                    # see benchmark/README.md) for head-to-head
 ```
 
 ## Build & Test

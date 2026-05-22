@@ -129,72 +129,79 @@ GPU parallelism shines with large files where the overhead is amortized.
 
 ## CPU Performance
 
-json has two CPU code paths, both served by `loads(target='cpu')`:
+json has one CPU code path served by `loads(target='cpu')`: a pure
+Mojo two-pass parser that emits a packed `Document` tape. Stage 1
+finds structural positions; stage 2 walks them and writes typed
+tape entries. SIMD stage 1 is the default; opt into the scalar
+oracle with `parse_cpu_native_tape[force_scalar=True]` (it exists
+mainly to validate the SIMD path under fuzzing).
 
-| Path | DOM model | What it costs |
-|---|---|---|
-| **tape** (default) | Eager `Document` tape: every primitive becomes a typed tape entry at parse time. SIMD stage 1 by default; opt into the scalar oracle with `parse_cpu_native_tape[force_scalar=True]` | A bit slower to parse than the legacy lazy approach we shipped historically; dramatically faster and correct on traversal of real-world JSON |
-| simdjson (FFI) | C++ simdjson via the `target='cpu-simdjson'` shim. The FFI output is translated into the same tape representation | Reference parser at the cost of FFI marshalling |
+`Value` is a tape-backed view over the resulting `Document`,
+sharing it via `ArcPointer`. Children are computed by walking
+`Document.tape` -- there is no on-access re-parse, no raw
+substring rescan, and no duplicate-key collapse. Strings are stored
+as `(offset, length)` slices into the original input and only
+materialise an owned `String` when the bytes need unescaping or the
+caller asks for one.
 
-### Two workloads, two answers
+The GPU pipeline emits the same `Document` shape, so CPU and GPU
+agree on one DOM representation; mutation propagates correctly
+through nested containers because every `Value` is just a stable
+index into the same tape.
 
-`pixi run -e dev bench-cpu <file>` reports both:
+### Benchmark methodology
 
-* `scalar` / `simd` -- "parse, then peek the root with
-  `is_object()`". Children are not touched, so this measures
-  the parse cost in isolation.
-* `scalar_traverse` / `simd_traverse` -- "parse, then recursively
-  visit every value via the public API
-  (`array_items` / `object_items` / `*_value`)". This is what almost
-  any real consumer ends up doing.
+`pixi run -e dev bench-cpu <file>` reports the same `simdjson` C++
+parser as the reference, then the Mojo parser, both under the same
+protocol:
 
-#### Historical comparison (Apple Silicon, M-series, this dev box)
+* **3 warmup + 100 measured iterations** per workload.
+* Throughput reported as **min-time-derived GB/s** (matches the
+  upstream simdjson convention).
+* Mojo's parser consumes its input by value, so the bench loop
+  pre-builds a `List[String]` of independent copies outside the
+  timed region. The simdjson side reuses one buffer because its
+  parser does not consume the input.
 
-The numbers below were collected while the legacy v0.1 lazy `Value`
-representation still shipped as a `-D JSON_USE_LAZY_VALUE=1`
-fallback. They are kept here as evidence for why the tape path is
-the only path the library now ships:
+Two workloads:
 
-| Corpus | Size | simdjson C++ | simd lazy (peek) | tape (peek) | simd lazy (traverse) | **tape (traverse)** |
-|---|---|---|---|---|---|---|
-| `twitter.json` | 617 KB | 2.66 GB/s | 1.18 GB/s | 0.23 GB/s | 142.9 ms | **4.17 ms (34x faster)** |
-| `citm_catalog.json` | 1.7 MB | 3.13 GB/s | 1.33 GB/s | 0.23 GB/s | **701 ms ❌ buggy** | **11.38 ms ✅ correct (62x faster)** |
-| `twitter_large_record.json` | 804 MB | 1.47 GB/s | 0.73 GB/s | 0.15 GB/s | (not run; quadratic-ish) | (eager parse only -- bench measures `peek`) |
+* **`parse_only`** -- `loads(...)` and peek the root tag. Measures
+  parse cost in isolation. The compiler can't elide the parse
+  because the root tag is touched.
+* **`parse_traverse`** -- parse and recursively visit every leaf
+  via the public API (`array_items` / `object_items` / `*_value`).
+  This is what real consumers do, and on the tape representation
+  it adds only a small constant on top of `parse_only`.
 
-The `citm_catalog` row was the punchline: the legacy lazy path
-raised `Key not found in JSON object` mid-walk because
-`object_items()` re-scanned the raw substring for each key it
-remembered, and that second scan could disagree with the first on
-documents with duplicate keys or non-trivial escape patterns. **The
-tape path is the only one that walks `citm_catalog` correctly**, and
-it does so 62x faster than the (buggy) lazy walk on the same input.
+### Numbers (Apple Silicon, M-series, this dev box)
 
-### Why tape is the only CPU path
+| Corpus | Size | simdjson `parse_only` | mojo `parse_only` (simd) | simdjson `parse_traverse` | mojo `parse_traverse` (simd) |
+|---|---|---|---|---|---|
+| `twitter.json` | 616 KB | 0.189 ms / 3.34 GB/s | 2.51 ms / 0.25 GB/s | 0.215 ms / 2.93 GB/s | 2.88 ms / 0.22 GB/s |
+| `citm_catalog.json` | 1.7 MB | 0.442 ms / 3.91 GB/s | 7.08 ms / 0.24 GB/s | 0.514 ms / 3.36 GB/s | 8.20 ms / 0.21 GB/s |
 
-The lazy v0.1 representation was fast for "parse and ignore", which
-is why it shipped first. But its on-access re-parse model was a
-documented silent-bug source: nested mutations didn't propagate
-through `Value` views, duplicate keys collapsed, and traversal cost
-was super-linear because every `object_items()` rescanned the raw
-substring. Every fix to those made the lazy path slower without
-making it correct, so the lazy `Value` representation was removed
-in favor of the tape:
+* `parse_only` gap: 13x on `twitter.json`, 16x on `citm_catalog.json`.
+* `parse_traverse` gap: 13x and 16x respectively.
+* The traverse step adds only 13-15% over `parse_only` on the tape
+  path -- iteration is just a tape walk, not a re-parse.
+* simdjson's `target='cpu-simdjson'` FFI shim is intentionally not
+  in this table; the FFI marshalling cost dominates and it has not
+  been competitive with the native Mojo path for several releases.
 
-* Each value gets exactly one tape entry. No re-parsing, no
-  re-scanning, no key-collision lottery.
-* Strings are stored as `(offset, length)` slices into the original
-  input -- zero-copy when the bytes don't need unescaping.
-* The GPU pipeline emits the same tape, so CPU and GPU now agree on
-  one DOM representation.
-* Because every `Value` is a stable index into the same tape,
-  copy-on-write mutation can correctly propagate through nested
-  containers (Phase 2d).
+### What's left to close the gap
 
-In other words: tape pays for correctness and post-parse traversal
-speed at parse time. That's the right trade for almost every real
-consumer. The legacy lazy path stays gated for now to unblock callers
-that haven't migrated, and will be removed entirely in a follow-up
-once the v0.1 `_raw` fields can come out of `Value`.
+The remaining ~13-16x is algorithmic, not representational:
+
+1. **Stage 1 SIMD** still serialises through scalar disambiguation
+   for escaped quotes / inside-string state. simdjson uses
+   carry-less multiplication; we don't yet.
+2. **Number parsing** in stage 2 is byte-at-a-time. simdjson uses
+   SWAR and Eisel-Lemire.
+3. **Tape writing** allocates `List` capacity reactively. simdjson
+   estimates the tape size from the structural-index density and
+   over-allocates once.
+
+These are tracked in `.cursor/rules/plans.mdc` (Phase 7).
 
 ## When to Use GPU vs CPU
 

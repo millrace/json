@@ -10,7 +10,7 @@ High-performance JSON library for Mojo with GPU acceleration.
 - **Reflection serde:** zero-boilerplate struct serialization via compile-time reflection
 - **GPU accelerated:** 2-4x faster than [cuJSON](https://github.com/AutomataLab/cuJSON) on large files (NVIDIA, AMD)
 - **Tape-backed Value:** v0.2 stores parsed JSON as a packed tape inside a `Document`; `Value` is a view; nested mutation propagates correctly
-- **Two-pass CPU parser:** stage 1 builds a structural index (scalar oracle + SIMD), stage 2 walks it; **~1.2 GB/s on `twitter.json` / 0.7 GB/s on the 804 MB record-shaped corpus** (Apple Silicon, M-series), zero FFI
+- **Two-pass CPU parser:** stage 1 builds a structural index (scalar oracle + SIMD), stage 2 emits a packed `Document` tape; ~0.25 GB/s parse-only / 0.22 GB/s parse + full-DOM traversal on `twitter.json` (Apple Silicon, M-series), zero FFI. Pure Mojo path is ~13-16x slower than simdjson C++ in absolute terms — see [docs/performance.md](./docs/performance.md) for the methodology and the work left to close that gap.
 - **Streaming and lazy parsing:** handle files larger than memory
 - **JSONPath and Schema:** query and validate JSON documents
 - **RFC compliant:** JSON Patch, Merge Patch, JSON Pointer
@@ -110,51 +110,39 @@ json = { git = "https://github.com/ehsanmok/json.git", branch = "main" }
 
 ### CPU (Apple Silicon, M-series)
 
-`pixi run bench-cpu <file>` runs simdjson C++ first, then the three
-Mojo CPU paths under both `parse + peek` and `parse + traverse-every-value`
-workloads.
+`pixi run -e dev bench-cpu <file>` runs simdjson C++ first, then the
+Mojo CPU path; both benches use the same protocol (3 warmup + 100
+measured iterations, min-time-derived throughput) and the same two
+workloads:
 
-**Parse + peek** (lazy paths short-circuit; tape pays full materialisation cost):
+- **`parse_only`** -- `loads(...)` and peek the root tag.
+- **`parse_traverse`** -- parse and walk every leaf value (the
+  realistic workload for any code that actually consumes the document).
 
-| File | Size | simdjson C++ | simd (lazy) | scalar (lazy) | tape (eager) |
+| File | Size | simdjson `parse_only` | mojo `parse_only` (simd) | simdjson `parse_traverse` | mojo `parse_traverse` (simd) |
 |---|---|---|---|---|---|
-| `twitter.json` | 617 KB | 2.66 GB/s | **1.18 GB/s** | 0.60 GB/s | 0.23 GB/s |
-| `citm_catalog.json` | 1.7 MB | 3.13 GB/s | **1.33 GB/s** | 0.62 GB/s | 0.23 GB/s |
-| `twitter_large_record.json` | 804 MB | 1.47 GB/s | **0.73 GB/s** | 0.51 GB/s | 0.15 GB/s |
+| `twitter.json` | 616 KB | 0.189 ms / 3.34 GB/s | 2.51 ms / 0.25 GB/s | 0.215 ms / 2.93 GB/s | 2.88 ms / 0.22 GB/s |
+| `citm_catalog.json` | 1.7 MB | 0.442 ms / 3.91 GB/s | 7.08 ms / 0.24 GB/s | 0.514 ms / 3.36 GB/s | 8.20 ms / 0.21 GB/s |
 
-**Parse + traverse every value** (the realistic workload):
-
-| File | simd_traverse (lazy) | **tape_traverse (eager)** |
-|---|---|---|
-| `twitter.json` | 142.9 ms | **4.17 ms (34x faster)** |
-| `citm_catalog.json` | **701 ms, but buggy ❌** | **11.38 ms, correct ✅ (62x faster)** |
-
-The lazy path raises `Key not found in JSON object` mid-walk on
-`citm_catalog` -- `object_items()` re-scans the raw substring for
-every remembered key, and the second scan can disagree with the first
-on documents with duplicate keys or non-trivial escapes. **Tape is
-the only path that walks `citm_catalog` correctly**, and it's 30-60×
-faster than the (buggy) lazy walk on the same input.
-
-The lazy paths still beat tape on `parse + peek` because they don't
-decode children -- they store array/object bodies as raw substrings
-and rescan on access. That makes them cheap when you ignore the
-parsed result and pathologically slow / incorrect when you don't.
-**`loads(target='cpu')` routes through the tape path** -- typed tape
-entries, zero-copy strings, one DOM representation shared with the
-GPU pipeline, and correct nested mutation. The legacy lazy `Value`
-representation has been removed; it was documented to be slower and
-to disagree with itself on documents like `citm_catalog`.
+The honest gap on the M-series is ~13-16x: 13x on `twitter.json`,
+16x on `citm_catalog.json`, parse-only and parse+traverse alike.
+It's stable across both corpora, which means it's algorithmic —
+simdjson's two-stage SIMD pipeline plus tape-direct reads — not a
+benchmark artifact. The mojo `Value` is now exclusively a
+tape-backed view over a `Document`, so traversal cost is comparable
+to parse cost (no on-access rescans, no per-call allocations
+besides the document itself). Closing the remaining gap is parser
+work, not representation work — see [docs/performance.md](./docs/performance.md).
 
 ```bash
-# Download large dataset first (required for meaningful GPU benchmarks).
-# `download-*` lives in the dev feature because it needs gdown, so pass -e dev.
+# Download large dataset (required for meaningful GPU benchmarks).
+# `download-*` lives in the dev feature because it needs gdown.
 pixi run -e dev download-twitter-large
 
-# Run GPU benchmark (only use large files)
+# GPU benchmark (large files only)
 pixi run bench-gpu benchmark/datasets/twitter_large_record.json
 
-# CPU bench: simdjson C++ vs Mojo simd / scalar / tape
+# CPU bench: simdjson C++ vs Mojo (scalar + simd, parse_only + parse_traverse)
 pixi run -e dev bench-cpu                                            # twitter.json
 pixi run -e dev bench-cpu benchmark/datasets/citm_catalog.json
 pixi run -e dev bench-cpu benchmark/datasets/twitter_large_record.json

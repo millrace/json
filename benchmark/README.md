@@ -60,39 +60,44 @@ cuJSON commit `2ac7d3dcd7ad1ff64ebdb14022bf94c59b3b4953`.
 
 ### CPU: Mojo native (default) vs simdjson C++ (Apple Silicon, M-series)
 
-`pixi run -e dev bench-cpu <file>` runs simdjson C++, then the three
-Mojo CPU paths (`scalar`, `simd`, `tape`) under two access patterns:
-`parse + peek the root` and `parse + walk every value`.
+`pixi run -e dev bench-cpu <file>` runs the native `simdjson` C++
+parser, then the Mojo CPU parser (scalar + SIMD stage 1 variants).
+Both benches share the same protocol:
 
-**Parse + peek** -- the lazy paths short-circuit because they don't
-decode children; tape pays full materialisation cost:
+* 3 warmup + 100 measured iterations.
+* Throughput reported as min-time-derived GB/s.
+* Mojo's parser consumes its input by value, so the bench loop
+  pre-builds a `List[String]` of independent copies outside the
+  timed region. The simdjson side reuses one buffer because its
+  parser does not consume the input.
 
-| Corpus | Size | simdjson C++ | Mojo simd | Mojo scalar | Mojo tape |
+Two workloads per parser:
+
+* **`parse_only`** -- `loads(...)` and peek the root tag.
+* **`parse_traverse`** -- parse + recursively visit every leaf via
+  the public `Value` API (the realistic workload).
+
+| Corpus | Size | simdjson `parse_only` | mojo `parse_only` (simd) | simdjson `parse_traverse` | mojo `parse_traverse` (simd) |
 |---|---|---|---|---|---|
-| `twitter.json` | 617 KB | 2.66 GB/s | **1.18 GB/s** | 0.60 GB/s | 0.23 GB/s |
-| `citm_catalog.json` | 1.7 MB | 3.13 GB/s | **1.33 GB/s** | 0.62 GB/s | 0.23 GB/s |
-| `twitter_large_record.json` | 804 MB | 1.47 GB/s | **0.73 GB/s** | 0.51 GB/s | 0.15 GB/s |
+| `twitter.json` | 616 KB | 0.189 ms / 3.34 GB/s | 2.51 ms / 0.25 GB/s | 0.215 ms / 2.93 GB/s | 2.88 ms / 0.22 GB/s |
+| `citm_catalog.json` | 1.7 MB | 0.442 ms / 3.91 GB/s | 7.08 ms / 0.24 GB/s | 0.514 ms / 3.36 GB/s | 8.20 ms / 0.21 GB/s |
 
-**Parse + traverse every value** -- the realistic workload for any
-consumer that actually reads the document:
+The Mojo parse-vs-traverse delta is 13-15% on both corpora.
+Because the v0.2 `Value` is a tape-backed view over `Document`,
+traversal is just a tape walk -- there is no on-access re-parse,
+no raw substring rescan, and no per-iteration allocation other
+than the document itself.
 
-| Corpus | simd_traverse (lazy) | **tape_traverse (eager)** |
-|---|---|---|
-| `twitter.json` | 142.9 ms | **4.17 ms** (34x faster) |
-| `citm_catalog.json` | **701 ms, but buggy ❌** | **11.38 ms, correct ✅** (62x faster) |
+The honest gap to native `simdjson` is ~13x on `twitter.json` and
+~16x on `citm_catalog.json` (parse-only and parse + traverse
+alike). It's stable across corpora, which makes it algorithmic
+(no carry-less multiplication in stage 1, scalar number parsing in
+stage 2, no tape pre-sizing), not a benchmark artefact. See
+[docs/performance.md](../docs/performance.md) for the breakdown.
 
-The lazy path raises `Key not found` mid-walk on `citm_catalog`
-because `object_items()` re-scans the raw substring per remembered
-key; that second scan can disagree with the first on documents with
-duplicate keys or non-trivial escapes. Tape is the only path that
-walks `citm_catalog` correctly **and** it's 30-60x faster than the
-(buggy) lazy walk on the same input.
-
-Historically, under peek-only, pure-Mojo `simd` (lazy) ran at ~50% of
-native simdjson with zero FFI; under realistic traversal, tape was
-both faster and the only correct option. **`loads(target='cpu')`
-routes through tape**, and the legacy lazy `Value` representation
-has been removed.
+The `target='cpu-simdjson'` FFI shim is intentionally not in this
+table; its FFI marshalling cost dominates and it has not been
+competitive with the native Mojo path for several releases.
 
 ## Important: GPU Benchmarks Require Large Files
 
@@ -322,11 +327,12 @@ automatically built during `pixi install` via the activation hook.
 ```
 benchmark/
 ├── mojo/
-│   ├── bench_cpu.mojo          # CPU: json (Mojo backend) via bench_function
-│   ├── bench_backend.mojo      # json (Mojo backend) vs simdjson FFI
+│   ├── bench_cpu.mojo          # CPU bench: parse_only + parse_traverse,
+│   │                           # 3 warmup + 100 iters, scalar + SIMD stage 1
+│   ├── bench_backend.mojo      # Cross-backend comparison harness
 │   └── bench_gpu.mojo          # GPU: 4-row Bench report + --debug-timing
 ├── cpp/
-│   └── bench_simdjson.cpp      # Native simdjson C++ reference
+│   └── bench_simdjson.cpp      # Native simdjson C++ reference, same protocol
 ├── cuJSON/                      # Optional: clone AutomataLab/cuJSON here
 │   └── build/
 │       └── cujson_benchmark    # Built by pixi run -e dev build-cujson
