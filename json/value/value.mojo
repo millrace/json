@@ -1,17 +1,14 @@
 # json - Core Value type.
 #
-# `Value` is the public JSON value type. As of v0.2, every `Value` is a
-# tape-backed view over a `Document` -- the v0.1 lazy / raw-substring
-# representation is no longer produced. The `_is_view` field and the
-# legacy fields (`_type`, `_raw`, `_keys`, ...) are scheduled for
-# removal in the dual-representation cleanup; until then read accessors
-# guard reads with `if self._is_view:` for safety, but every code path
-# that reaches `Value` now produces a view.
-#
-# Helpers split:
-#   - Pure string operations (used by `LazyValue`) live in `raw_ops.mojo`.
-#   - Value-dependent helpers (`_value_to_json`, etc.) live here so the
-#     import graph stays acyclic.
+# `Value` is the public JSON value type. Every `Value` is a
+# tape-backed view over a `Document`: the data lives in
+# `_doc[].tape[_tape_idx]` plus the side pools of `_doc`, and the
+# accessors below read it back. Primitive constructors
+# (`Value(Null())`, `Value(42)`, `Value("hi")`, ...) build a
+# single-entry `Document` and wrap it. Mutations (`set` / `append`
+# / `set_at`) materialise the view into an `OwnedValue` tree, splice
+# in the change, and rebuild the document so every accessor still
+# reads from a tape.
 
 from std.collections import List
 from std.memory import ArcPointer
@@ -52,36 +49,15 @@ struct Null(Writable):
 
 
 struct Value(Copyable, Movable, Writable):
-    """A JSON value that can hold null, bool, int, float, string, array, or object.
+    """A JSON value: a tape-backed view over a `Document`.
 
-    A `Value` lives in one of two storage modes:
-
-    * Legacy / owned: `_is_view == False`. The fields `_type`, `_bool`,
-      `_int`, `_float`, `_string`, `_raw`, `_keys`, `_count` carry the
-      data; arrays / objects are reconstituted from `_raw` on demand.
-      This is the v0.1 representation.
-    * Tape-backed view: `_is_view == True`. The data lives in
-      `_doc[].tape[_tape_idx]` and the side pools of `_doc`. Read
-      accessors below dispatch on `_is_view` and read directly from
-      the tape; mutations (`set` / `append`) materialise the view into
-      a legacy tree first.
-
-    The view path is what `parse_into_document` (Phase 2a) feeds into
-    when `loads()` is wired to the tape pipeline (Phase 2c).
+    `_doc` is shared via an `ArcPointer` so child views (e.g. those
+    returned by `array_items()` / `__getitem__`) bump a refcount
+    instead of cloning the document. `_tape_idx` is the entry's slot
+    in `_doc[].tape`; the tag at that slot is what `is_*` /
+    `*_value` / iteration walk.
     """
 
-    var _type: Int  # 0=null, 1=bool, 2=int, 3=float, 4=string, 5=array, 6=object
-    var _bool: Bool
-    var _int: Int64
-    var _float: Float64
-    var _string: String
-    var _raw: String  # Raw JSON for arrays/objects
-    var _keys: List[String]  # Object keys
-    var _count: Int  # Array/object element count
-    # Phase 2b: tape-backed view fields. `_doc` is shared via
-    # ArcPointer so child views (e.g. those returned by
-    # `array_items()`) bump a refcount instead of cloning the document.
-    var _is_view: Bool
     var _doc: ArcPointer[Document]
     var _tape_idx: Int
 
@@ -89,39 +65,10 @@ struct Value(Copyable, Movable, Writable):
         """Primary constructor: a tape-backed view over `doc[].tape[tape_idx]`.
 
         All other public constructors delegate here by building a
-        single-entry `Document` and wrapping it in an `ArcPointer`. The
-        legacy `_type` / `_bool` / ... fields are mirrored from the
-        tape tag so any v0.1 code that still peeks at `_type` directly
-        stays honest while the dual-representation branches are still
-        in tree (they collapse in commit 4 of this plan).
+        single-entry `Document` and wrapping it in an `ArcPointer`.
         """
-        self._bool = False
-        self._int = 0
-        self._float = 0.0
-        self._string = String()
-        self._raw = String()
-        self._keys = List[String]()
-        self._count = 0
-        self._is_view = True
         self._doc = doc
         self._tape_idx = tape_idx
-        var tag = self._doc[].get_tag(tape_idx)
-        if tag == TAPE_TAG_NULL:
-            self._type = 0
-        elif tag == TAPE_TAG_BOOL:
-            self._type = 1
-        elif tag == TAPE_TAG_INT:
-            self._type = 2
-        elif tag == TAPE_TAG_FLOAT:
-            self._type = 3
-        elif tag == TAPE_TAG_STRING or tag == TAPE_TAG_STRING_OWNED:
-            self._type = 4
-        elif tag == TAPE_TAG_ARRAY:
-            self._type = 5
-        elif tag == TAPE_TAG_OBJECT:
-            self._type = 6
-        else:
-            self._type = 0
 
     def __init__(out self, null: Null):
         var d = Document()
@@ -161,27 +108,13 @@ struct Value(Copyable, Movable, Writable):
     def copy(self) -> Self:
         """Create a copy of this Value.
 
-        For legacy values this is a deep copy of the in-memory tree.
-        For tape-backed views the copy is cheap: the document lives
-        behind an ArcPointer, so we bump a refcount and clone the
-        scalar fields.
+        Cheap: the document lives behind an ArcPointer, so we bump a
+        refcount and clone the tape index.
 
         Returns:
             A new Value with the same content.
         """
-        var v = Value(Null())
-        v._type = self._type
-        v._bool = self._bool
-        v._int = self._int
-        v._float = self._float
-        v._string = self._string
-        v._raw = self._raw
-        v._keys = self._keys.copy()
-        v._count = self._count
-        v._is_view = self._is_view
-        v._doc = self._doc.copy()
-        v._tape_idx = self._tape_idx
-        return v^
+        return Value(self._doc.copy(), self._tape_idx)
 
     def clone(self) -> Self:
         """Alias for copy(). Creates a deep copy of this Value.
@@ -191,10 +124,6 @@ struct Value(Copyable, Movable, Writable):
         """
         return self.copy()
 
-    # ------------------------------------------------------------------
-    # View-mode helpers
-    # ------------------------------------------------------------------
-
     @always_inline
     def _view_tag(self) -> UInt8:
         """Return the tape tag for the entry this view points at."""
@@ -202,136 +131,78 @@ struct Value(Copyable, Movable, Writable):
 
     # Type checking
     def is_null(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_NULL
-        return self._type == 0
+        return self._view_tag() == TAPE_TAG_NULL
 
     def is_bool(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_BOOL
-        return self._type == 1
+        return self._view_tag() == TAPE_TAG_BOOL
 
     def is_int(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_INT
-        return self._type == 2
+        return self._view_tag() == TAPE_TAG_INT
 
     def is_float(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_FLOAT
-        return self._type == 3
+        return self._view_tag() == TAPE_TAG_FLOAT
 
     def is_string(self) -> Bool:
-        if self._is_view:
-            var t = self._view_tag()
-            return t == TAPE_TAG_STRING or t == TAPE_TAG_STRING_OWNED
-        return self._type == 4
+        var t = self._view_tag()
+        return t == TAPE_TAG_STRING or t == TAPE_TAG_STRING_OWNED
 
     def is_array(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_ARRAY
-        return self._type == 5
+        return self._view_tag() == TAPE_TAG_ARRAY
 
     def is_object(self) -> Bool:
-        if self._is_view:
-            return self._view_tag() == TAPE_TAG_OBJECT
-        return self._type == 6
+        return self._view_tag() == TAPE_TAG_OBJECT
 
     def is_number(self) -> Bool:
-        if self._is_view:
-            var t = self._view_tag()
-            return t == TAPE_TAG_INT or t == TAPE_TAG_FLOAT
-        return self._type == 2 or self._type == 3
+        var t = self._view_tag()
+        return t == TAPE_TAG_INT or t == TAPE_TAG_FLOAT
 
     # Value extraction
     def bool_value(self) -> Bool:
-        if self._is_view:
-            return self._doc[].get_bool(self._tape_idx)
-        return self._bool
+        return self._doc[].get_bool(self._tape_idx)
 
     def int_value(self) -> Int64:
-        if self._is_view:
-            return self._doc[].get_int(self._tape_idx)
-        return self._int
+        return self._doc[].get_int(self._tape_idx)
 
     def float_value(self) -> Float64:
-        if self._is_view:
-            return self._doc[].get_float(self._tape_idx)
-        return self._float
+        return self._doc[].get_float(self._tape_idx)
 
     def string_value(self) -> String:
-        if self._is_view:
-            return self._doc[].get_string(self._tape_idx)
-        return self._string
+        return self._doc[].get_string(self._tape_idx)
 
     def raw_json(self) -> String:
-        if self._is_view:
-            return _view_to_json(self)
-        return self._raw
+        return _emit_view_json(self._doc, self._tape_idx)
 
     def array_count(self) -> Int:
-        if self._is_view:
-            return self._doc[].get_count(self._tape_idx)
-        return self._count
+        return self._doc[].get_count(self._tape_idx)
 
     def object_keys(self) -> List[String]:
-        if self._is_view:
-            ref doc = self._doc[]
-            var pair_count = doc.get_count(self._tape_idx)
-            var child_start = doc.get_child_start(self._tape_idx)
-            var keys = List[String](capacity=pair_count)
-            for i in range(pair_count):
-                keys.append(doc.get_key(child_start + 2 * i))
-            return keys^
-        return self._keys.copy()
+        ref doc = self._doc[]
+        var pair_count = doc.get_count(self._tape_idx)
+        var child_start = doc.get_child_start(self._tape_idx)
+        var keys = List[String](capacity=pair_count)
+        for i in range(pair_count):
+            keys.append(doc.get_key(child_start + 2 * i))
+        return keys^
 
     def object_count(self) -> Int:
-        if self._is_view:
-            return self._doc[].get_count(self._tape_idx)
-        return self._count
+        return self._doc[].get_count(self._tape_idx)
 
     # Stringable
     def __str__(self) -> String:
-        if self._is_view:
-            return _view_to_json(self)
-        if self._type == 0:
-            return "null"
-        elif self._type == 1:
-            return "true" if self._bool else "false"
-        elif self._type == 2:
-            return String(self._int)
-        elif self._type == 3:
-            return String(self._float)
-        elif self._type == 4:
-            return '"' + self._string + '"'
-        elif self._type == 5 or self._type == 6:
-            return self._raw
-        return "unknown"
+        return _emit_view_json(self._doc, self._tape_idx)
 
     def write_to[W: Writer](self, mut writer: W):
         writer.write(self.__str__())
 
-    # Equality. Equality between view and legacy Values compares
-    # their materialized JSON forms, which is the only definition
-    # consistent with what user code can observe via the public API.
     def __eq__(self, other: Value) -> Bool:
-        if self._is_view or other._is_view:
-            return _view_eq(self, other)
-        if self._type != other._type:
-            return False
-        if self._type == 0:
-            return True
-        elif self._type == 1:
-            return self._bool == other._bool
-        elif self._type == 2:
-            return self._int == other._int
-        elif self._type == 3:
-            return self._float == other._float
-        elif self._type == 4:
-            return self._string == other._string
-        elif self._type == 5 or self._type == 6:
-            return self._raw == other._raw
-        return False
+        """Equality compares serialized JSON form.
+
+        Both sides are tape-backed views, so the only stable
+        cross-document definition of equality is "same JSON". For
+        primitives this still short-circuits through the typed
+        accessors before falling back to a full serialize.
+        """
+        return _view_eq(self, other)
 
     def __ne__(self, other: Value) -> Bool:
         return not self.__eq__(other)
@@ -499,10 +370,8 @@ struct Value(Copyable, Movable, Writable):
 
         var rebuilt = _serialize_into_value(owned)
         # Install the rebuilt tape view in place of the current one.
-        self._is_view = True
         self._doc = rebuilt._doc.copy()
         self._tape_idx = rebuilt._tape_idx
-        self._type = rebuilt._type
 
     def set(mut self, index: Int, value: Value) raises:
         """Set a value at an array index.
@@ -526,10 +395,8 @@ struct Value(Copyable, Movable, Writable):
         owned.array_val[index] = owned_value^
 
         var rebuilt = _serialize_into_value(owned)
-        self._is_view = True
         self._doc = rebuilt._doc.copy()
         self._tape_idx = rebuilt._tape_idx
-        self._type = rebuilt._type
 
     def append(mut self, value: Value) raises:
         """Append a value to a JSON array.
@@ -549,10 +416,8 @@ struct Value(Copyable, Movable, Writable):
         owned.array_val.append(owned_value^)
 
         var rebuilt = _serialize_into_value(owned)
-        self._is_view = True
         self._doc = rebuilt._doc.copy()
         self._tape_idx = rebuilt._tape_idx
-        self._type = rebuilt._type
 
     def set_at(mut self, pointer: String, value: Value) raises:
         """Set a nested value via JSON Pointer (RFC 6901).
@@ -571,15 +436,6 @@ struct Value(Copyable, Movable, Writable):
         """
         if pointer == "":
             # Whole-document replacement.
-            self._type = value._type
-            self._bool = value._bool
-            self._int = value._int
-            self._float = value._float
-            self._string = value._string
-            self._raw = value._raw
-            self._keys = value._keys.copy()
-            self._count = value._count
-            self._is_view = value._is_view
             self._doc = value._doc.copy()
             self._tape_idx = value._tape_idx
             return
@@ -590,10 +446,8 @@ struct Value(Copyable, Movable, Writable):
         _set_at_pointer(tree, tokens, 0, new_val^)
 
         var rebuilt = _serialize_into_value(tree)
-        self._is_view = True
         self._doc = rebuilt._doc.copy()
         self._tape_idx = rebuilt._tape_idx
-        self._type = rebuilt._type
 
     def at(self, pointer: String) raises -> Value:
         """Navigate to a value using JSON Pointer (RFC 6901).
@@ -718,13 +572,10 @@ def _view_to_json(v: Value) -> String:
     """Serialize a tape-backed view into a JSON string.
 
     Used by `Value.raw_json()` / `Value.__str__()` / equality
-    comparison when the value is in view mode. Walks the tape
-    recursively. Non-raising: on a corrupt tape the function returns
-    a sentinel "<bad-tape>" string, which is a strictly better
-    failure mode than panicking inside `__str__`.
+    comparison. Walks the tape recursively. Non-raising: on a corrupt
+    tape the function returns a sentinel "<bad-tape>" string, which is
+    a strictly better failure mode than panicking inside `__str__`.
     """
-    if not v._is_view:
-        return v.raw_json()
     return _emit_view_json(v._doc, v._tape_idx)
 
 
@@ -803,11 +654,11 @@ def _escape_json_string(s: String) -> String:
 
 
 def _view_eq(a: Value, b: Value) -> Bool:
-    """Equality comparison when at least one side is a view.
+    """Equality comparison between two tape-backed views.
 
-    Compares by serialized JSON, which is the only definition that
-    survives mixing view and legacy values without round-tripping
-    everything through OwnedValue.
+    Compares by serialized JSON form for containers; primitives still
+    short-circuit through the typed accessors so most comparisons stay
+    cheap.
     """
     var sa = a.raw_json() if (a.is_array() or a.is_object()) else String()
     var sb = b.raw_json() if (b.is_array() or b.is_object()) else String()

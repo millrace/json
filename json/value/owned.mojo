@@ -143,14 +143,9 @@ struct OwnedValue(Copyable, Movable):
 def _value_to_owned(v: Value) raises -> OwnedValue:
     """Convert a `Value` to an `OwnedValue` tree.
 
-    Two fast paths:
-    * Tape-backed view (`v._is_view`): walk `Document.tape` directly
-      via `_view_to_owned`. No JSON serialization, no parsing.
-    * Legacy `_raw`: parse the raw substring with `_parse_owned_value`.
-
-    For primitives we always go through the inline value; the `is_*`
-    accessors already dispatch on `_is_view`, so this branch works
-    for both modes.
+    `Value` is always a tape-backed view, so containers walk
+    `Document.tape` directly via `_view_to_owned`; no JSON
+    serialization, no parsing.
     """
     if v.is_null():
         return OwnedValue.make_null()
@@ -163,9 +158,7 @@ def _value_to_owned(v: Value) raises -> OwnedValue:
     if v.is_string():
         return OwnedValue.make_string(v.string_value())
     if v.is_array() or v.is_object():
-        if v._is_view:
-            return _view_to_owned(v._doc, v._tape_idx)
-        return _parse_owned_value(v.raw_json())
+        return _view_to_owned(v._doc, v._tape_idx)
     raise Error("Unknown Value kind in _value_to_owned")
 
 
