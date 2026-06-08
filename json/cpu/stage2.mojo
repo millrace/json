@@ -304,13 +304,13 @@ struct _Frame(Copyable, Movable):
     var headers_lo: Int  # checkpoint into headers_scratch
 
     @always_inline
-    fn __init__(out self, kind: UInt8, headers_lo: Int):
+    def __init__(out self, kind: UInt8, headers_lo: Int):
         self.kind = kind
         self.headers_lo = headers_lo
 
 
-alias _FRAME_ARRAY: UInt8 = 0
-alias _FRAME_OBJECT: UInt8 = 1
+comptime _FRAME_ARRAY: UInt8 = 0
+comptime _FRAME_OBJECT: UInt8 = 1
 
 
 def parse_into_document(

@@ -24,7 +24,7 @@ scripts = ["json/cpu/simdjson_ffi/build.sh"]
 # examples, `mojo build`-ing benchmark binaries). The activation hook below
 # compiles the simdjson FFI wrapper on every env activation, so a C++ compiler
 # has to be available here, not gated behind a dev feature.
-mojo = "==1.0.0b1"
+mojo = "==1.0.0b2.dev2026060706"
 simdjson = ">=4.2.4,<5"
 
 [target.linux-64.dependencies]
@@ -60,7 +60,10 @@ gdown = ">=5.0"           # Google Drive CLI for downloading benchmark datasets
 # it up without an explicit -I flag.
 # ------------------------------------------------------------------
 [feature.fuzz.dependencies]
-mozz = { git = "https://github.com/ehsanmok/mozz.git", tag = "v0.1.3" }
+# Disabled during the nightly port: mozz v0.1.3 (latest tag) pins mojo ==1.0.0b1
+# and shares the default solve-group, so it blocks the whole solve. Fuzzing is
+# dev-only; re-enable once mozz publishes a current-nightly tag.
+# mozz = { git = "https://github.com/ehsanmok/mozz.git", tag = "v0.1.3" }
 
 [environments]
 # `default` stays lean -- just what's needed to build + run the library.

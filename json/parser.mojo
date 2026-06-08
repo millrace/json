@@ -25,7 +25,10 @@ from .document import (
     TAPE_TAG_OBJECT,
 )
 from .types import JSONInput, JSONResult
-from .gpu import parse_json_gpu, parse_gpu_to_value
+# GPU backend decoupled in this CPU-only build (nightly port). The json/gpu
+# module needs the new DeviceContext.enqueue API migrated before it can be
+# re-enabled. See README port notes.
+# from .gpu import parse_json_gpu, parse_gpu_to_value
 
 
 # =============================================================================
@@ -186,56 +189,9 @@ def _parse_cpu[backend: StaticString = "simdjson"](s: String) raises -> Value:
 # =============================================================================
 
 
-def _parse_gpu(s: String) raises -> Value:
-    """Parse JSON using the GPU pipeline.
-
-    GPU computes structural positions in parallel; the tape adapter
-    (`gpu/tape_adapter.mojo`) applies the in-string filter on the
-    CPU side and feeds the result to stage 2, so Value construction
-    goes through the same code path as the CPU backends.
-    """
-    var data = s.as_bytes()
-    var start = 0
-
-    # Skip leading whitespace
-    while start < len(data) and (
-        data[start] == 0x20
-        or data[start] == 0x09
-        or data[start] == 0x0A
-        or data[start] == 0x0D
-    ):
-        start += 1
-
-    if start >= len(data):
-        raise Error(json_parse_error("Empty or whitespace-only input", s, 0))
-
-    var first_char = data[start]
-
-    # Top-level primitives short-circuit GPU launch overhead.
-    if first_char == UInt8(ord("n")):
-        return Value(Null())
-    if first_char == UInt8(ord("t")):
-        return Value(True)
-    if first_char == UInt8(ord("f")):
-        return Value(False)
-    if first_char == 0x22:  # '"'
-        return _parse_string_value(s, start)
-    if first_char == UInt8(ord("-")) or (
-        first_char >= UInt8(ord("0")) and first_char <= UInt8(ord("9"))
-    ):
-        return _parse_number_value(s, start)
-
-    # Objects and arrays: GPU produces structural positions, tape adapter
-    # converts them into a Value via stage 2.
-    var n = len(data)
-    var bytes = List[UInt8](capacity=n)
-    bytes.resize(n, 0)
-    memcpy(dest=bytes.unsafe_ptr(), src=data.unsafe_ptr(), count=n)
-
-    var input_obj = JSONInput(bytes^)
-    var result = parse_json_gpu(input_obj^)
-
-    return parse_gpu_to_value(s, result^)
+# _parse_gpu removed in this CPU-only build (nightly port) — it depended on the
+# json/gpu module, which needs the new Mojo GPU API migrated. Re-add with the
+# GPU port.
 
 
 def _parse_string_value(s: String, start: Int) raises -> Value:
@@ -326,11 +282,8 @@ def loads[target: StaticString = "cpu"](s: String) raises -> Value:
     elif target == "cpu-simdjson":
         return _parse_cpu["simdjson"](s)
     elif target == "gpu":
-        # The GPU pipeline runs natively on NVIDIA, AMD, and Apple
-        # Metal: `gpu/kernels.mojo` emits the raw structural bitmap
-        # and `gpu/tape_adapter.mojo` applies the in-string filter
-        # CPU-side. See `_parse_gpu` for the entry point.
-        return _parse_gpu(s)
+        comptime assert False, "GPU target disabled in this CPU-only build of json"
+        return _parse_cpu["mojo"](s)  # unreachable; satisfies the type checker
     else:
         return _parse_cpu["mojo"](s)
 
