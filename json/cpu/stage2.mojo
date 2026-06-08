@@ -163,8 +163,7 @@ def _skip_ws(bytes: Span[UInt8, _], start: Int, end: Int) -> Int:
 
         # pack_bits' output dtype must hold _BLOCK bits. Comptime
         # branch picks the right width with no runtime cost.
-        @parameter
-        if _BLOCK == 16:
+        comptime if _BLOCK == 16:
             var ws_bits = pack_bits[dtype=DType.uint16](is_ws_mask)
             if ws_bits != UInt16(0xFFFF):
                 var first_non_ws = Int(count_trailing_zeros(~ws_bits))
