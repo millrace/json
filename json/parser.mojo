@@ -283,7 +283,6 @@ def loads[target: StaticString = "cpu"](s: String) raises -> Value:
         return _parse_cpu["simdjson"](s)
     elif target == "gpu":
         comptime assert False, "GPU target disabled in this CPU-only build of json"
-        return _parse_cpu["mojo"](s)  # unreachable; satisfies the type checker
     else:
         return _parse_cpu["mojo"](s)
 
