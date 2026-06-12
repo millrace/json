@@ -161,7 +161,7 @@ def parse_structural_simd(input: String) -> StructuralIndex:
 
         # --- Classify ----------------------------------------------------
         comptime W = SIMD[DType.uint8, SIMD_WIDTH]
-        var classified = _classify_chunk(chunk)
+        var classified = _classify_chunk[SIMD_WIDTH](chunk)
 
         var struct_bool = (classified & W(_CAT_STRUCT_MASK)).ne(W(0))
         var quote_bool = (classified & W(_CAT_QUOTE)).ne(W(0))
